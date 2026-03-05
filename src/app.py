@@ -1,10 +1,16 @@
+
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-from formatter import format_sql
+from formatter import format_sq
 
-APP_TITLE = "EBH SQL Formatter"
+
+APP_TITLE = "EBH SQL Formatterz"
 
 
 def main():
