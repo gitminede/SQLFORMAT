@@ -20,40 +20,49 @@ _RX_HTML = [
 
 
 def format_sql(sql: str) -> str:
-    # CRLF normalizálás: a \r eltávolítása elég (CRLF -> \n marad)
+    # CRLF normalizálás (ne legyenek \r-ek)
     s = sql.replace("\r", "")
 
-    # HTML entity visszaalakítás
+    # 0) Pajzs: kommentek + stringek kivétele
+    s, tokens = _shield_comments_and_strings(s)
+
+    # 1) HTML entity visszaalakítás (MOST már biztonságos, mert string/komment nem érintett)
     for rx, repl in _RX_HTML:
         s = rx.sub(repl, s)
 
-    # szeparátor normalizálás
+    # 2) szeparátor normalizálás
     s = _RX_SEP.sub("-------------------------------------------------------------------------------", s)
 
-    # NOLOCK normalizálás (WITH nélkül, nagybetűvel)
+    # 3) NOLOCK normalizálás
     s = _RX_WITH_NOLOCK.sub("( NOLOCK )", s)
     s = _RX_BARE_NOLOCK.sub("( NOLOCK )", s)
 
-    # Kulcsszó prefixek (kulcsszó után nincs külön sor)
+    # 4) Prefixek
     s = re.sub(r"\bSELECT\s+", "SELECT   ", s, flags=re.IGNORECASE)
     s = re.sub(r"\bFROM\s+", "FROM     ", s, flags=re.IGNORECASE)
     s = re.sub(r"\bWHERE\s+", "WHERE    ", s, flags=re.IGNORECASE)
 
-    # JOIN / ON indent a megbeszélt mintára
+    # 5) JOIN / ON indent + ON spacing (a korábbi javításaid szerint)
     s = _normalize_join_on_indent(s)
-    s = _normalize_on_spacing(s)      # <-- EZ 
-    # SELECT-listában '=' oszlop igazítás (vessző bal oldalon feltételezve)
+    s = _normalize_on_spacing(s)
+
+    # 6) SELECT '=' igazítás
     s = _align_select_equals(s)
 
-    # WHERE/ON blokkokban operátor-oszlop igazítás (minden operátorra),
-    # és AND/OR a *WHERE/ON utáni első feltétel* alatt legyen
+    # 7) WHERE operátor-oszlop igazítás (csak WHERE, ON-t nem)
     s = _align_where_on_ops(s)
 
-    # CASE WHEN kompakt (CASE WHEN egy sorban, THEN/ELSE a WHEN alatt)
+    # 8) CASE WHEN kompakt
     s = _compact_case_when(s)
-    s = _align_create_table_columns(s)  # <-- EZ AZ ÚJ
+
+    # 9) CREATE TABLE oszlop/típus igazítás (A pontból)
+    s = _align_create_table_columns(s)
+
+    # 10) Pajzs vissza:ek + stringek eredetije
+    s = _unshield(s, tokens)
 
     return s.rstrip() + "\n"
+
 
 
 def _normalize_join_on_indent(s: str) -> str:
@@ -394,7 +403,81 @@ def _align_create_table_columns(s: str) -> str:
             i += 1
 
     return "\n".join(out)
+def _shield_comments_and_strings(s: str):
+    """
+    Kiszedi (shieldeli) a kommenteket és string literálokat placeholder-ekre.
+    Visszaad: (shielded_text, tokens)
+    tokens: {placeholder: original_text}
+    """
+    tokens = {}
+    out = []
+    i = 0
+    n = len(s)
+    token_id = 0
 
+    def new_token(text: str) -> str:
+        nonlocal token_id
+        token_id += 1
+        key = f"__EBH_SHIELD_{token_id:06d}__"
+        tokens[key] = text
+        return key
+
+    while i < n:
+        ch = s[i]
+
+        # 1) Egysoros komment: -- ... \n
+        if ch == "-" and i + 1 < n and s[i + 1] == "-":
+            j = i + 2
+            while j < n and s[j] != "\n":
+                j += 1
+            comment = s[i:j]          # \n nélkül
+            out.append(new_token(comment))
+            i = j
+            continue
+
+        # 2) Blokk komment: /* ... */
+        if ch == "/" and i + 1 < n and s[i + 1] == "*":
+            j = i + 2
+            while j + 1 < n and not (s[j] == "*" and s[j + 1] == "/"):
+                j += 1
+            j = min(j + 2, n)         # záró */-ig (ha nincs, EOF)
+            comment = s[i:j]
+            out.append(new_token(comment))
+            i = j
+            continue
+
+        # 3) String literál: '...' (SQL Server: '' escape)
+        if ch == "'":
+            j = i + 1
+            while j < n:
+                if s[j] == "'":
+                    # '' -> escape, lépjünk tovább
+                    if j + 1 < n and s[j + 1] == "'":
+                        j += 2
+                        continue
+                    j += 1  # záró '
+                    break
+                j += 1
+            string_lit = s[i:j]
+            out.append(new_token(string_lit))
+            i = j
+            continue
+
+        # default
+        out.append(ch)
+        i += 1
+
+    return "".join(out), tokens
+
+
+def _unshield(s: str, tokens: dict) -> str:
+    """
+    Placeholder-ek visszacserélése az eredeti tartalomra.
+    """
+    # a kulcsok egyediek és nincs bennük whitespace; sima replace elég és gyors
+    for key, val in tokens.items():
+        s = s.replace(key, val)
+    return s
 
 def _compact_case_when(s: str) -> str:
     """
