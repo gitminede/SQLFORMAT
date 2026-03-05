@@ -51,6 +51,7 @@ def format_sql(sql: str) -> str:
 
     # CASE WHEN kompakt (CASE WHEN egy sorban, THEN/ELSE a WHEN alatt)
     s = _compact_case_when(s)
+    s = _align_create_table_columns(s)  # <-- EZ AZ ÚJ
 
     return s.rstrip() + "\n"
 
@@ -305,6 +306,91 @@ def _normalize_on_spacing(s: str) -> str:
             kw = m2.group("kw").upper()
             rest2 = norm_expr(m2.group("rest"))
             out.append(f"{ws2}{kw} {rest2}")
+            i += 1
+
+    return "\n".join(out)
+
+def _align_create_table_columns(s: str) -> str:
+    """
+    CREATE TABLE (...) blokkokban:
+    - az oszlopnév és a típus/constraint rész igazítása oszlopokra
+    - vessző bal oldalon marad
+    - kommentet (--) a sor végén érintetlenül hagyjuk (csak a bal oldali spacinget rendezzük)
+    """
+    lines = s.split("\n")
+    out = []
+    i = 0
+
+    rx_create = re.compile(r"^\s*CREATE\s+TABLE\b", re.IGNORECASE)
+    rx_open = re.compile(r"^\s*\(\s*$")
+    rx_close = re.compile(r"^\s*\)\s*;?\s*$")
+
+    # oszlopdef sor: "       , col_name   TYPE ..."
+    rx_col = re.compile(r"^(?P<indent>\s*)(?P<comma>,\s*)?(?P<name>\[[^\]]+\]|[A-Za-z0-9_#]+)\s+(?P<rest>.+)$")
+
+    while i < len(lines):
+        if not rx_create.match(lines[i]):
+            out.append(lines[i])
+            i += 1
+            continue
+
+        # CREATE TABLE sort kiírjuk
+        out.append(lines[i])
+        i += 1
+
+        # ha nincs nyitó zárójel a következő sorban, nincs mit igazítani
+        if i >= len(lines) or not rx_open.match(lines[i]):
+            continue
+
+        # nyitó zárójel sor
+        out.append(lines[i])
+        i += 1
+
+        # gyűjtjük az oszlopdef sorokat a zárójel bezárásáig
+        block_start = i
+        col_rows = []
+        max_name_len = 0
+
+        while i < len(lines) and not rx_close.match(lines[i]):
+            ln = lines[i]
+
+            m = rx_col.match(ln)
+            if m and not ln.lstrip().startswith("--") and not ln.lstrip().startswith("/*"):
+                indent = m.group("indent")
+                comma = m.group("comma") or ""
+                name = m.group("name")
+                rest = m.group("rest")
+
+                # kommentet leválasztjuk, hogy a spacing ne nyúljon bele
+                comment = ""
+                if "--" in rest:
+                    # csak az első '--' utáni részt tekintjük kommentnek
+                    parts = rest.split("--", 1)
+                    rest = parts[0].rstrip()
+                    comment = "--" + parts[1]
+
+                max_name_len = max(max_name_len, len(name))
+                col_rows.append((i, indent, comma, name, rest, comment))
+            i += 1
+
+        # újraépítjük a blokkot
+        col_idx_map = {idx: (indent, comma, name, rest, comment) for idx, indent, comma, name, rest, comment in col_rows}
+
+        for j in range(block_start, i):
+            if j not in col_idx_map:
+                out.append(lines[j])
+                continue
+
+            indent, comma, name, rest, comment = col_idx_map[j]
+            # 1 space a padded név és a rest között, és a rest balról trimelve
+            rebuilt = f"{indent}{comma}{name.ljust(max_name_len)} {rest.lstrip()}"
+            if comment:
+                rebuilt = f"{rebuilt} {comment}".rstrip()
+            out.append(rebuilt)
+
+        # záró sor: ) vagy );
+        if i < len(lines) and rx_close.match(lines[i]):
+            out.append(lines[i])
             i += 1
 
     return "\n".join(out)
