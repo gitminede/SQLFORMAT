@@ -455,48 +455,81 @@ def _compact_case_when(s: str) -> str:
 def main():
     root = tk.Tk()
     root.title(APP_TITLE)
-    root.geometry("1000x650")
+    root.geometry("1200x700")
 
-    frm = ttk.Frame(root, padding=10)
-    frm.pack(fill=tk.BOTH, expand=True)
+    outer = ttk.Frame(root, padding=10)
+    outer.pack(fill=tk.BOTH, expand=True)
 
-    ttk.Label(frm, text="Ide másold be az SQL-t:").pack(anchor=tk.W)
+    # Felső gombsor
+    top = ttk.Frame(outer)
+    top.pack(fill=tk.X, pady=(0, 8))
 
-    txt = tk.Text(frm, wrap=tk.NONE, undo=True)
-    txt.pack(fill=tk.BOTH, expand=True, pady=(6, 10))
+    # Középső rész: két panel egymás mellett
+    paned = ttk.PanedWindow(outer, orient=tk.HORIZONTAL)
+    paned.pack(fill=tk.BOTH, expand=True)
 
-    btns = ttk.Frame(frm)
-    btns.pack(fill=tk.X)
+    left = ttk.Labelframe(paned, text="Eredeti (Input)")
+    right = ttk.Labelframe(paned, text="Formázott (Output)")
+    paned.add(left, weight=1)
+    paned.add(right, weight=1)
 
-    def show_output(formatted: str):
-        win = tk.Toplevel(root)
-        win.title("Formázott eredmény")
-        win.geometry("1000x650")
+    # --- Left text + scrollbars ---
+    input_text = tk.Text(left, wrap=tk.NONE, undo=True)
+    input_text.grid(row=0, column=0, sticky="nsew")
 
-        out = tk.Text(win, wrap=tk.NONE)
-        out.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        out.insert(tk.END, formatted)
+    in_y = ttk.Scrollbar(left, orient=tk.VERTICAL, command=input_text.yview)
+    in_x = ttk.Scrollbar(left, orient=tk.HORIZONTAL, command=input_text.xview)
+    input_text.configure(yscrollcommand=in_y.set, xscrollcommand=in_x.set)
 
-        bar = ttk.Frame(win, padding=10)
-        bar.pack(fill=tk.X)
+    in_y.grid(row=0, column=1, sticky="ns")
+    in_x.grid(row=1, column=0, sticky="ew")
 
-        def copy_all():
-            win.clipboard_clear()
-            win.clipboard_append(out.get("1.0", tk.END))
+    left.rowconfigure(0, weight=1)
+    left.columnconfigure(0, weight=1)
 
-        ttk.Button(bar, text="Másolás", command=copy_all).pack(side=tk.RIGHT)
-        ttk.Button(bar, text="Bezárás", command=win.destroy).pack(side=tk.RIGHT, padx=(0, 8))
+    # --- Right text + scrollbars (read-only) ---
+    output_text = tk.Text(right, wrap=tk.NONE)
+    output_text.grid(row=0, column=0, sticky="nsew")
+    output_text.configure(state=tk.DISABLED)
+
+    out_y = ttk.Scrollbar(right, orient=tk.VERTICAL, command=output_text.yview)
+    out_x = ttk.Scrollbar(right, orient=tk.HORIZONTAL, command=output_text.xview)
+    output_text.configure(yscrollcommand=out_y.set, xscrollcommand=out_x.set)
+
+    out_y.grid(row=0, column=1, sticky="ns")
+    out_x.grid(row=1, column=0, sticky="ew")
+
+    right.rowconfigure(0, weight=1)
+    right.columnconfigure(0, weight=1)
+
+    # Helper: output mező írása read-only módban
+    def set_output(text: str):
+        output_text.configure(state=tk.NORMAL)
+        output_text.delete("1.0", tk.END)
+        output_text.insert(tk.END, text)
+        output_text.configure(state=tk.DISABLED)
+
+    def copy_output():
+        root.clipboard_clear()
+        root.clipboard_append(output_text.get("1.0", tk.END))
 
     def do_format():
         try:
-            src = txt.get("1.0", tk.END)
+            src = input_text.get("1.0", tk.END)
             res = format_sql(src)
-            show_output(res)
+            set_output(res)
         except Exception as ex:
             messagebox.showerror("Hiba", str(ex))
 
-    ttk.Button(btns, text="Formázás", command=do_format).pack(side=tk.LEFT)
-    ttk.Label(btns, text="Tipp: Ctrl+V / Ctrl+A", foreground="#666").pack(side=tk.RIGHT)
+    # Gombok
+    ttk.Button(top, text="Formázás", command=do_format).pack(side=tk.LEFT)
+    ttk.Button(top, text="Másolás (Output)", command=copy_output).pack(side=tk.LEFT, padx=(8, 0))
+
+    ttk.Label(
+        top,
+        text="Tipp: Ctrl+V / Ctrl+A az Input mezőben, Output másolás a gombbal.",
+        foreground="#666",
+    ).pack(side=tk.RIGHT)
 
     root.mainloop()
 
