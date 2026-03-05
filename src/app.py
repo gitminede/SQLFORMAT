@@ -56,21 +56,64 @@ def format_sql(sql: str) -> str:
 
 
 def _normalize_join_on_indent(s: str) -> str:
-    join_indent = " " * 9
-    on_indent = " " * 11
+    """
+    EBH mintára:
+    - JOIN a FROM utáni forrás oszlopa alá (FROM sor behúzását figyelembe véve)
+    - ON a JOIN alá +2 szóközzel
+    Példa:
+        <ws>FROM     <src>
+        <ws>         JOIN <src2>
+        <ws>           ON <cond>
+    ahol <ws> a FROM sor eleji whitespace.
+    """
+    lines = s.split("\n")
+    out = []
 
-    # JOIN sorok elejére fix indent
-    s = re.sub(
-        r"^\s*(INNER\s+JOIN|LEFT\s+(?:OUTER\s+)?JOIN|RIGHT\s+(?:OUTER\s+)?JOIN|FULL\s+(?:OUTER\s+)?JOIN|CROSS\s+APPLY|OUTER\s+APPLY|JOIN)\b",
-        lambda m: join_indent + m.group(0).lstrip(),
-        s,
-        flags=re.IGNORECASE | re.MULTILINE,
+    rx_from = re.compile(r"^(?P<ws>\s*)FROM\s{5}\b", re.IGNORECASE)
+    rx_clause_end = re.compile(
+        r"^\s*(WHERE\s{4}\b|GROUP\s+BY\b|ORDER\s+BY\b|HAVING\b|UNION\b|EXCEPT\b|INTERSECT\b|INSERT\b|UPDATE\b|DELETE\b|MERGE\b)\b",
+        re.IGNORECASE,
     )
+    rx_join = re.compile(
+        r"^\s*(INNER\s+JOIN|LEFT\s+(?:OUTER\s+)?JOIN|RIGHT\s+(?:OUTER\s+)?JOIN|FULL\s+(?:OUTER\s+)?JOIN|CROSS\s+APPLY|OUTER\s+APPLY|JOIN)\b",
+        re.IGNORECASE,
+    )
+    rx_on = re.compile(r"^\s*ON\b", re.IGNORECASE)
 
-    # ON sorok elejére fix indent + 'ON ' (szóköz az ON után!)
-    s = re.sub(r"^\s*ON\b", on_indent + "ON ", s, flags=re.IGNORECASE | re.MULTILINE)
+    active_ws = None
+    join_ws = None
+    on_ws = None
 
-    return s
+    for ln in lines:
+        m_from = rx_from.match(ln)
+        if m_from:
+            active_ws = m_from.group("ws")
+            # FROM + 5 space = 9 karakter “prefix”; JOIN ennek az oszlopnak megfelelően indul
+            join_ws = active_ws + (" " * 9)
+            on_ws = active_ws + (" " * 11)  # JOIN +2
+            out.append(ln)
+            continue
+
+        # Ha új clause kezdődik, FROM-blokk vége
+        if active_ws and rx_clause_end.match(ln):
+            active_ws = None
+            join_ws = None
+            on_ws = None
+            out.append(ln)
+            continue
+
+        if join_ws and rx_join.match(ln):
+            out.append(join_ws + ln.lstrip())
+            continue
+
+        if on_ws and rx_on.match(ln):
+            rest = re.sub(r"^\s*ON\s+", "", ln, flags=re.IGNORECASE)
+            out.append(on_ws + "ON " + rest.strip())
+            continue
+
+        out.append(ln)
+
+    return "\n".join(out)
 
 
 def _align_select_equals(s: str) -> str:
@@ -120,11 +163,10 @@ def _align_select_equals(s: str) -> str:
 
 def _align_where_on_ops(s: str) -> str:
     """
-    WHERE / ON blokk igazítás:
-    - Az első sor: WHERE    <cond>  / ON <cond>
-    - A további AND/OR sorok: a WHERE/ON utáni első feltétel oszlopa alá kerülnek
-      (tehát nem a WHERE/ON alá)
-    - Operátor-oszlop igazítás (minden operátorra, IN/NOT IN is).
+    WHERE/ON blokk:
+    - AND/OR az első feltétel alá igazodik (nem a WHERE alá)
+    - Operátor-oszlop igazítás: =, <>, >=, LIKE, stb.
+    - KIVÉTEL: IN / NOT IN -> NEM igazítjuk oszlopba, csak 1 space legyen: "<lhs> NOT IN ( ... )"
     """
     lines = s.split("\n")
     out = []
@@ -132,10 +174,8 @@ def _align_where_on_ops(s: str) -> str:
 
     rx_where = re.compile(r"^(?P<ws>\s*)WHERE\s{4}(?P<rest>.*)$", re.IGNORECASE)
     rx_on = re.compile(r"^(?P<ws>\s*)ON\s+(?P<rest>.*)$", re.IGNORECASE)
-
     rx_andor = re.compile(r"^(?P<ws>\s*)(?P<kw>AND|OR)\b(?P<rest>.*)$", re.IGNORECASE)
 
-    # operátor felismerés (minden operátor)
     rx_op = re.compile(
         r"^(?P<lhs>.+?)\s+(?P<op>NOT\s+IN|IN|IS\s+NOT\s+NULL|IS\s+NULL|NOT\s+LIKE|LIKE|BETWEEN|>=|<=|<>|!=|=|>|<)\s+(?P<rhs>.+)$",
         re.IGNORECASE,
@@ -150,23 +190,18 @@ def _align_where_on_ops(s: str) -> str:
             i += 1
             continue
 
-        # Blokk típus és prefix hossza (mivel már normalizáltuk WHERE    és ON )
         if m_where:
             head_ws = m_where.group("ws")
-            head_prefix = "WHERE    "  # 9 chars
+            head_prefix = head_ws + "WHERE    "
             head_rest = m_where.group("rest").lstrip()
-            base_prefix_len = len(head_prefix)
-            head_line_prefix = head_ws + head_prefix
+            cond_start_prefix = head_ws + (" " * len("WHERE    "))
         else:
             head_ws = m_on.group("ws")
-            head_prefix = "ON "  # ON után legyen szóköz
+            head_prefix = head_ws + "ON "
             head_rest = m_on.group("rest").lstrip()
-            base_prefix_len = len(head_prefix)
-            head_line_prefix = head_ws + head_prefix
+            cond_start_prefix = head_ws + (" " * len("ON "))
 
-        # Gyűjtjük a blokk sorait: head + egymást követő AND/OR sorok
-        block = []
-        block.append(("HEAD", head_line_prefix, head_rest))
+        block = [("HEAD", head_prefix, head_rest)]
         i += 1
 
         while i < len(lines):
@@ -178,43 +213,49 @@ def _align_where_on_ops(s: str) -> str:
             block.append((kw, None, rest))
             i += 1
 
-        # Meghatározzuk, hova igazodjon az AND/OR: a feltétel kezdőoszlopa alá
-        cond_start_prefix = head_ws + (" " * base_prefix_len)
-
-        # Operátor-oszlop igazításhoz: max LHS hossz a blokkban (mind HEAD, mind AND/OR)
-        parsed = []
+        # max_lhs csak a “nem IN/NOT IN” sorokra (hogy IN/NOT IN ne tolódjon)
         max_lhs = 0
+        parsed = []
 
         for kind, prefix, rest in block:
             mo = rx_op.match(rest)
             if not mo:
-                parsed.append((kind, prefix, None))
+                parsed.append((kind, prefix, None, rest))
                 continue
 
             lhs = mo.group("lhs").rstrip()
             op = re.sub(r"\s+", " ", mo.group("op").upper())
             rhs = mo.group("rhs").strip()
-            max_lhs = max(max_lhs, len(lhs))
-            parsed.append((kind, prefix, (lhs, op, rhs)))
 
-        # Újraépítés
-        for kind, prefix, parts in parsed:
+            parsed.append((kind, prefix, (lhs, op, rhs), None))
+
+            if op not in ("IN", "NOT IN"):
+                max_lhs = max(max_lhs, len(lhs))
+
+        for kind, prefix, parts, raw_rest in parsed:
             if parts is None:
-                # nem tudtuk operátorra bontani, hagyjuk
+                # nem bontottuk operátorra, hagyjuk
                 if kind == "HEAD":
-                    out.append(head_line_prefix + block[0][2])
+                    out.append(prefix + (raw_rest or ""))
                 else:
-                    out.append(cond_start_prefix + kind + " " + (block[[b[0] for b in block].index(kind)][2]))
+                    out.append(cond_start_prefix + kind + " " + (raw_rest or ""))
                 continue
 
             lhs, op, rhs = parts
 
-            if kind == "HEAD":
-                out.append(f"{head_line_prefix}{lhs.ljust(max_lhs)} {op} {rhs}")
+            # IN/NOT IN: nincs igazítás, csak 1 space
+            if op in ("IN", "NOT IN"):
+                line = f"{lhs} {op} {rhs.lstrip()}"
             else:
-                out.append(f"{cond_start_prefix}{kind} {lhs.ljust(max_lhs)} {op} {rhs}")
+                line = f"{lhs.ljust(max_lhs)} {op} {rhs.lstrip()}"
+
+            if kind == "HEAD":
+                out.append(prefix + line)
+            else:
+                out.append(cond_start_prefix + kind + " " + line)
 
     return "\n".join(out)
+
 
 
 def _compact_case_when(s: str) -> str:
