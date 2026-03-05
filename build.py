@@ -20,7 +20,6 @@ def main():
         "--windowed",
         "--onefile",
         "--name", APP_NAME,
-        "--paths", "src",
         entry,
     ]
 
