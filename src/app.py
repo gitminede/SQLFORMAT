@@ -163,10 +163,13 @@ def _align_select_equals(s: str) -> str:
 
 def _align_where_on_ops(s: str) -> str:
     """
-    WHERE/ON blokk:
+    EBH WHERE/ON blokk:
     - AND/OR az első feltétel alá igazodik (nem a WHERE alá)
-    - Operátor-oszlop igazítás: =, <>, >=, LIKE, stb.
-    - KIVÉTEL: IN / NOT IN -> NEM igazítjuk oszlopba, csak 1 space legyen: "<lhs> NOT IN ( ... )"
+    - Operátor-oszlop igazítás (minden operátorra)
+    - KIVÉTEL: IN / NOT IN -> NEM oszlopos igazítás, csak 1 space: "<lhs> NOT IN ( ... )"
+    - FONTOS: a HEAD sorban nincs 'AND ' előtag, ezért az operátor-oszlop igazítást
+      úgy számoljuk, hogy a folytató sorok 'AND ' / 'OR ' előtagja is beleszámítson.
+      (Ez adja azt a plusz paddinget, amit a példádban kértél.)
     """
     lines = s.split("\n")
     out = []
@@ -190,6 +193,7 @@ def _align_where_on_ops(s: str) -> str:
             i += 1
             continue
 
+        # HEAD prefix + a feltétel (rest)
         if m_where:
             head_ws = m_where.group("ws")
             head_prefix = head_ws + "WHERE    "
@@ -201,7 +205,9 @@ def _align_where_on_ops(s: str) -> str:
             head_rest = m_on.group("rest").lstrip()
             cond_start_prefix = head_ws + (" " * len("ON "))
 
-        block = [("HEAD", head_prefix, head_rest)]
+        # Gyűjtjük a blokkot: HEAD + egymást követő AND/OR sorok
+        block = []
+        block.append(("HEAD", "", head_rest))  # HEAD-nek nincs AND/OR előtagja
         i += 1
 
         while i < len(lines):
@@ -210,52 +216,69 @@ def _align_where_on_ops(s: str) -> str:
                 break
             kw = m.group("kw").upper()
             rest = m.group("rest").strip()
-            block.append((kw, None, rest))
+            block.append((kw, kw + " ", rest))  # pl. "AND " / "OR "
             i += 1
 
-        # max_lhs csak a “nem IN/NOT IN” sorokra (hogy IN/NOT IN ne tolódjon)
-        max_lhs = 0
+        # Itt számoljuk ki az igazításhoz használt max bal oldali hosszt.
+        # A HEAD sorhoz úgy viszonyítunk, mintha lenne "AND " előtagja (4 char),
+        # mert a folytató soroknál ez része a "bal oldalnak".
+        max_left_for_align = 0
         parsed = []
 
-        for kind, prefix, rest in block:
+        for kind, kw_text, rest in block:
             mo = rx_op.match(rest)
             if not mo:
-                parsed.append((kind, prefix, None, rest))
+                parsed.append((kind, kw_text, None, rest))
                 continue
 
             lhs = mo.group("lhs").rstrip()
             op = re.sub(r"\s+", " ", mo.group("op").upper())
             rhs = mo.group("rhs").strip()
 
-            parsed.append((kind, prefix, (lhs, op, rhs), None))
+            parsed.append((kind, kw_text, (lhs, op, rhs), None))
 
-            if op not in ("IN", "NOT IN"):
-                max_lhs = max(max_lhs, len(lhs))
+            # IN/NOT IN kivétel: nem számoljuk bele az oszlopos igazításba
+            if op in ("IN", "NOT IN"):
+                continue
 
-        for kind, prefix, parts, raw_rest in parsed:
+            if kind == "HEAD":
+                left_len = len("AND " + lhs)   # HEAD-et AND-del ekvivalensnek tekintjük
+            else:
+                left_len = len(kw_text + lhs)  # pl. "AND " + lhs
+
+            max_left_for_align = max(max_left_for_align, left_len)
+
+        # Újraépítés
+        for kind, kw_text, parts, raw_rest in parsed:
             if parts is None:
-                # nem bontottuk operátorra, hagyjuk
+                # nem tudtuk operátorra bontani, hagyjuk
                 if kind == "HEAD":
-                    out.append(prefix + (raw_rest or ""))
+                    out.append(head_prefix + (raw_rest or ""))
                 else:
-                    out.append(cond_start_prefix + kind + " " + (raw_rest or ""))
+                    out.append(cond_start_prefix + kw_text + (raw_rest or ""))
                 continue
 
             lhs, op, rhs = parts
 
-            # IN/NOT IN: nincs igazítás, csak 1 space
+            # IN/NOT IN: csak 1 space, nincs padding
             if op in ("IN", "NOT IN"):
-                line = f"{lhs} {op} {rhs.lstrip()}"
+                line = f"{lhs} {op} {rhs}"
             else:
-                line = f"{lhs.ljust(max_lhs)} {op} {rhs.lstrip()}"
+                if kind == "HEAD":
+                    # HEAD: mintha "AND " előtag is lenne, ezért +4-gyel számolunk
+                    pad = max_left_for_align - len("AND " + lhs)
+                else:
+                    pad = max_left_for_align - len(kw_text + lhs)
+
+                line = f"{lhs}{' ' * pad} {op} {rhs}"
 
             if kind == "HEAD":
-                out.append(prefix + line)
+                out.append(head_prefix + line)
             else:
-                out.append(cond_start_prefix + kind + " " + line)
+                out.append(cond_start_prefix + kw_text + line)
 
     return "\n".join(out)
-
+    
 
 
 def _compact_case_when(s: str) -> str:
