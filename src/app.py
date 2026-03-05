@@ -403,6 +403,78 @@ def _align_create_table_columns(s: str) -> str:
             i += 1
 
     return "\n".join(out)
+def _align_cte_closing_paren(s: str) -> str:
+    """
+    CTE-kben az AS ( ... ) záró ')' igazítása a nyitó '(' oszlop alá.
+
+    - Megkeresi az összes 'AS (' előfordulást (case-insensitive).
+    - Onnan zárójel-szint számlálással megkeresi a hozzá tartozó záró ')'-t.
+    - Csak akkor nyúl a záró sorhoz, ha a záró ')' a sorban önálló (esetleg ',' vagy ';' követi):
+        )      vagy ),      vagy );      vagy ),;
+      (whitespace körülötte lehet)
+    - Ha a záró ')' nem önálló (pl. ') x' derived subquery alias), nem módosítja.
+    """
+    # Gyűjtsük ki előre az AS ( pozíciókat, hogy utólag visszafelé dolgozzunk
+    rx_as_open = re.compile(r"\bAS\s*\(", re.IGNORECASE)
+    matches = list(rx_as_open.finditer(s))
+    if not matches:
+        return s
+
+    # Visszafelé módosítunk, hogy az indexek ne csússzanak el
+    for m in reversed(matches):
+        open_paren_pos = m.end() - 1  # '(' pozíció
+        # Nyitó zárójel oszlopának (column) meghatározása
+        line_start = s.rfind("\n", 0, open_paren_pos) + 1
+        open_col = open_paren_pos - line_start
+
+        # Zárójel-szint számlálás a nyitó '(' után
+        depth = 1
+        i = open_paren_pos + 1
+        n = len(s)
+        close_paren_pos = None
+
+        while i < n:
+            ch = s[i]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    close_paren_pos = i
+                    break
+            i += 1
+
+        if close_paren_pos is None:
+            continue  # nincs meg a párja (hibás SQL), hagyjuk
+
+        # A záró ')' sorának meghatározása
+        close_line_start = s.rfind("\n", 0, close_paren_pos) + 1
+        close_line_end = s.find("\n", close_paren_pos)
+        if close_line_end == -1:
+            close_line_end = len(s)
+
+        close_line = s[close_line_start:close_line_end]
+
+        # Csak akkor igazítunk, ha a sor (strip után) csak ')' + opcionális ','/';'
+        stripped = close_line.strip()
+        # Megengedjük: ")", "),", ");", "),;", valamint whitespace körülötte
+        if not re.fullmatch(r"\)\s*[,;]?\s*[,;]?\s*", stripped):
+            continue
+
+        # Vegyük ki a ')' utáni írásjeleket pontosan (pl. "),")
+        # (stripeltből dolgozunk, mert a line eleji indentet úgyis újraírjuk)
+        tail = stripped[1:].strip()  # ')' utáni rész: "", ",", ";", ",;" stb.
+        new_line = (" " * open_col) + ")" + ((" " + tail) if tail else "")
+        # Megjegyzés: a ",;" előtt nem akarunk plusz space-t -> ezért kis trükk:
+        # ha tail csak írásjel(ek), akkor ne tegyünk közé szóközt
+        if tail and re.fullmatch(r"[,;]{1,2}", tail):
+            new_line = (" " * open_col) + ")" + tail
+
+        # Cseréljük a sort az eredeti sorvégi newline megtartásával
+        s = s[:close_line_start] + new_line + s[close_line_end:]
+
+    return s
+    
 def _shield_comments_and_strings(s: str):
     """
     Kiszedi (shieldeli) a kommenteket és string literálokat placeholder-ekre.
