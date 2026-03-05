@@ -41,7 +41,7 @@ def format_sql(sql: str) -> str:
 
     # JOIN / ON indent a megbeszélt mintára
     s = _normalize_join_on_indent(s)
-
+    s = _normalize_on_spacing(s)      # <-- EZ 
     # SELECT-listában '=' oszlop igazítás (vessző bal oldalon feltételezve)
     s = _align_select_equals(s)
 
@@ -163,20 +163,17 @@ def _align_select_equals(s: str) -> str:
 
 def _align_where_on_ops(s: str) -> str:
     """
-    EBH WHERE/ON blokk:
+    EBH WHERE blokk:
     - AND/OR az első feltétel alá igazodik (nem a WHERE alá)
-    - Operátor-oszlop igazítás (minden operátorra), DE:
-      * IN / NOT IN -> csak 1 szóköz, nincs oszlopos igazítás
-    - A HEAD (WHERE/ON) sor operátor-oszlopa igazodjon az AND/OR sorokéhoz is.
-      (Ennek kulcsa: a max oszlopot LHS nélkül számoljuk, és az AND/OR előtagot
-       a padolásban kompenzáljuk.)
+    - Operátor-oszlop igazítás (minden operátorra)
+    - KIVÉTEL: IN / NOT IN -> csak 1 szóköz, nincs oszlopos igazítás
+    Megjegyzés: ON blokkot NEM igazítunk oszlopba (külön normalizáljuk).
     """
     lines = s.split("\n")
     out = []
     i = 0
 
     rx_where = re.compile(r"^(?P<ws>\s*)WHERE\s{4}(?P<rest>.*)$", re.IGNORECASE)
-    rx_on = re.compile(r"^(?P<ws>\s*)ON\s+(?P<rest>.*)$", re.IGNORECASE)
     rx_andor = re.compile(r"^(?P<ws>\s*)(?P<kw>AND|OR)\b(?P<rest>.*)$", re.IGNORECASE)
 
     rx_op = re.compile(
@@ -186,25 +183,17 @@ def _align_where_on_ops(s: str) -> str:
 
     while i < len(lines):
         m_where = rx_where.match(lines[i])
-        m_on = rx_on.match(lines[i])
 
-        if not (m_where or m_on):
+        if not m_where:
             out.append(lines[i])
             i += 1
             continue
 
-        if m_where:
-            head_ws = m_where.group("ws")
-            head_prefix = head_ws + "WHERE    "
-            head_rest = m_where.group("rest").lstrip()
-            cond_start_prefix = head_ws + (" " * len("WHERE    "))
-        else:
-            head_ws = m_on.group("ws")
-            head_prefix = head_ws + "ON "
-            head_rest = m_on.group("rest").lstrip()
-            cond_start_prefix = head_ws + (" " * len("ON "))
+        head_ws = m_where.group("ws")
+        head_prefix = head_ws + "WHERE    "
+        head_rest = m_where.group("rest").lstrip()
+        cond_start_prefix = head_ws + (" " * len("WHERE    "))
 
-        # blokk: HEAD + egymást követő AND/OR sorok
         block = [("HEAD", "", head_rest)]
         i += 1
 
@@ -214,10 +203,9 @@ def _align_where_on_ops(s: str) -> str:
                 break
             kw = m.group("kw").upper()
             rest = m.group("rest").strip()
-            block.append((kw, kw + " ", rest))  # "AND " / "OR "
+            block.append((kw, kw + " ", rest))
             i += 1
 
-        # 1) LHS max hossz (csak azoknál, ahol oszlopos igazítás kell)
         max_lhs = 0
         parsed = []
 
@@ -230,19 +218,14 @@ def _align_where_on_ops(s: str) -> str:
             lhs = mo.group("lhs").rstrip()
             op = re.sub(r"\s+", " ", mo.group("op").upper())
             rhs = mo.group("rhs").strip()
-
             parsed.append((kind, kw_text, (lhs, op, rhs), None))
 
-            # IN/NOT IN kivétel: ne vegyen részt az oszlopos igazításban
             if op in ("IN", "NOT IN"):
                 continue
-
             max_lhs = max(max_lhs, len(lhs))
 
-        # 2) Kiírás: HEAD és AND/OR ugyanarra az operátor oszlopra essen
         for kind, kw_text, parts, raw_rest in parsed:
             if parts is None:
-                # nem tudtuk operátorra bontani -> hagyjuk
                 if kind == "HEAD":
                     out.append(head_prefix + (raw_rest or ""))
                 else:
@@ -251,18 +234,11 @@ def _align_where_on_ops(s: str) -> str:
 
             lhs, op, rhs = parts
 
-            # IN/NOT IN: csak 1 space
             if op in ("IN", "NOT IN"):
                 line = f"{lhs} {op} {rhs}"
             else:
-                # HEAD: nincs AND/OR előtag, AND/OR soroknál van 4 char előtag.
-                # Ezért HEAD pad = max_lhs - len(lhs) + 4
-                # AND/OR pad = max_lhs - len(lhs)
-                if kind == "HEAD":
-                    pad = (max_lhs - len(lhs)) + 4
-                else:
-                    pad = (max_lhs - len(lhs))
-
+                # HEAD sor kompenzáció: +4, hogy egyvonalban legyen az AND sorok '=' oszlopával
+                pad = (max_lhs - len(lhs)) + (4 if kind == "HEAD" else 0)
                 line = f"{lhs}{' ' * pad} {op} {rhs}"
 
             if kind == "HEAD":
@@ -271,7 +247,67 @@ def _align_where_on_ops(s: str) -> str:
                 out.append(cond_start_prefix + kw_text + line)
 
     return "\n".join(out)
-    
+
+def _normalize_on_spacing(s: str) -> str:
+    """
+    ON (és az ON alatti AND/OR) feltételekben:
+    - az operátorok körül 1 szóköz legyen
+    - NOT IN / IN között is 1 szóköz logikusan: 'lhs NOT IN ( ... )'
+    - NINCS oszlopos igazítás (nem padolunk)
+    """
+    lines = s.split("\n")
+    out = []
+    i = 0
+
+    rx_on = re.compile(r"^(?P<ws>\s*)ON\s+(?P<rest>.*)$", re.IGNORECASE)
+    rx_andor = re.compile(r"^(?P<ws>\s*)(?P<kw>AND|OR)\s+(?P<rest>.*)$", re.IGNORECASE)
+
+    # szimbolikus operátorok köré 1 space
+    rx_sym = re.compile(r"\s*(>=|<=|<>|!=|=|>|<)\s*")
+    # IN/NOT IN/LIKE/BETWEEN/IS NULL alakok
+    rx_wordops = [
+        (re.compile(r"\s+(NOT\s+IN|IN)\s+", re.IGNORECASE), lambda m: f" {re.sub(r'\\s+', ' ', m.group(1).upper())} "),
+        (re.compile(r"\s+(NOT\s+LIKE|LIKE)\s+", re.IGNORECASE), lambda m: f" {re.sub(r'\\s+', ' ', m.group(1).upper())} "),
+        (re.compile(r"\s+(IS\s+NOT\s+NULL|IS\s+NULL)\b", re.IGNORECASE), lambda m: f" {re.sub(r'\\s+', ' ', m.group(1).upper())}"),
+        (re.compile(r"\s+(BETWEEN)\s+", re.IGNORECASE), lambda m: " BETWEEN "),
+    ]
+
+    def norm_expr(expr: str) -> str:
+        # összespacelés 1-re (de stringek védelme még nincs – később B pontnál hozzuk)
+        x = re.sub(r"\s+", " ", expr.strip())
+        # word operátorok
+        for rx, repl in rx_wordops:
+            x = rx.sub(repl, x)
+        # szimbolikus operátorok
+        x = rx_sym.sub(r" \1 ", x)
+        # többszörös space vissza 1-re
+        x = re.sub(r"\s+", " ", x).strip()
+        return x
+
+    while i < len(lines):
+        m = rx_on.match(lines[i])
+        if not m:
+            out.append(lines[i])
+            i += 1
+            continue
+
+        ws = m.group("ws")
+        rest = norm_expr(m.group("rest"))
+        out.append(f"{ws}ON {rest}")
+        i += 1
+
+        # ON alatti AND/OR sorok (ha vannak)
+        while i < len(lines):
+            m2 = rx_andor.match(lines[i])
+            if not m2:
+                break
+            ws2 = m2.group("ws")
+            kw = m2.group("kw").upper()
+            rest2 = norm_expr(m2.group("rest"))
+            out.append(f"{ws2}{kw} {rest2}")
+            i += 1
+
+    return "\n".join(out)
 
 
 def _compact_case_when(s: str) -> str:
