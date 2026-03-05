@@ -165,11 +165,11 @@ def _align_where_on_ops(s: str) -> str:
     """
     EBH WHERE/ON blokk:
     - AND/OR az első feltétel alá igazodik (nem a WHERE alá)
-    - Operátor-oszlop igazítás (minden operátorra)
-    - KIVÉTEL: IN / NOT IN -> NEM oszlopos igazítás, csak 1 space: "<lhs> NOT IN ( ... )"
-    - FONTOS: a HEAD sorban nincs 'AND ' előtag, ezért az operátor-oszlop igazítást
-      úgy számoljuk, hogy a folytató sorok 'AND ' / 'OR ' előtagja is beleszámítson.
-      (Ez adja azt a plusz paddinget, amit a példádban kértél.)
+    - Operátor-oszlop igazítás (minden operátorra), DE:
+      * IN / NOT IN -> csak 1 szóköz, nincs oszlopos igazítás
+    - A HEAD (WHERE/ON) sor operátor-oszlopa igazodjon az AND/OR sorokéhoz is.
+      (Ennek kulcsa: a max oszlopot LHS nélkül számoljuk, és az AND/OR előtagot
+       a padolásban kompenzáljuk.)
     """
     lines = s.split("\n")
     out = []
@@ -193,7 +193,6 @@ def _align_where_on_ops(s: str) -> str:
             i += 1
             continue
 
-        # HEAD prefix + a feltétel (rest)
         if m_where:
             head_ws = m_where.group("ws")
             head_prefix = head_ws + "WHERE    "
@@ -205,9 +204,8 @@ def _align_where_on_ops(s: str) -> str:
             head_rest = m_on.group("rest").lstrip()
             cond_start_prefix = head_ws + (" " * len("ON "))
 
-        # Gyűjtjük a blokkot: HEAD + egymást követő AND/OR sorok
-        block = []
-        block.append(("HEAD", "", head_rest))  # HEAD-nek nincs AND/OR előtagja
+        # blokk: HEAD + egymást követő AND/OR sorok
+        block = [("HEAD", "", head_rest)]
         i += 1
 
         while i < len(lines):
@@ -216,13 +214,11 @@ def _align_where_on_ops(s: str) -> str:
                 break
             kw = m.group("kw").upper()
             rest = m.group("rest").strip()
-            block.append((kw, kw + " ", rest))  # pl. "AND " / "OR "
+            block.append((kw, kw + " ", rest))  # "AND " / "OR "
             i += 1
 
-        # Itt számoljuk ki az igazításhoz használt max bal oldali hosszt.
-        # A HEAD sorhoz úgy viszonyítunk, mintha lenne "AND " előtagja (4 char),
-        # mert a folytató soroknál ez része a "bal oldalnak".
-        max_left_for_align = 0
+        # 1) LHS max hossz (csak azoknál, ahol oszlopos igazítás kell)
+        max_lhs = 0
         parsed = []
 
         for kind, kw_text, rest in block:
@@ -237,21 +233,16 @@ def _align_where_on_ops(s: str) -> str:
 
             parsed.append((kind, kw_text, (lhs, op, rhs), None))
 
-            # IN/NOT IN kivétel: nem számoljuk bele az oszlopos igazításba
+            # IN/NOT IN kivétel: ne vegyen részt az oszlopos igazításban
             if op in ("IN", "NOT IN"):
                 continue
 
-            if kind == "HEAD":
-                left_len = len("AND " + lhs)   # HEAD-et AND-del ekvivalensnek tekintjük
-            else:
-                left_len = len(kw_text + lhs)  # pl. "AND " + lhs
+            max_lhs = max(max_lhs, len(lhs))
 
-            max_left_for_align = max(max_left_for_align, left_len)
-
-        # Újraépítés
+        # 2) Kiírás: HEAD és AND/OR ugyanarra az operátor oszlopra essen
         for kind, kw_text, parts, raw_rest in parsed:
             if parts is None:
-                # nem tudtuk operátorra bontani, hagyjuk
+                # nem tudtuk operátorra bontani -> hagyjuk
                 if kind == "HEAD":
                     out.append(head_prefix + (raw_rest or ""))
                 else:
@@ -260,15 +251,17 @@ def _align_where_on_ops(s: str) -> str:
 
             lhs, op, rhs = parts
 
-            # IN/NOT IN: csak 1 space, nincs padding
+            # IN/NOT IN: csak 1 space
             if op in ("IN", "NOT IN"):
                 line = f"{lhs} {op} {rhs}"
             else:
+                # HEAD: nincs AND/OR előtag, AND/OR soroknál van 4 char előtag.
+                # Ezért HEAD pad = max_lhs - len(lhs) + 4
+                # AND/OR pad = max_lhs - len(lhs)
                 if kind == "HEAD":
-                    # HEAD: mintha "AND " előtag is lenne, ezért +4-gyel számolunk
-                    pad = max_left_for_align - len("AND " + lhs)
+                    pad = (max_lhs - len(lhs)) + 4
                 else:
-                    pad = max_left_for_align - len(kw_text + lhs)
+                    pad = (max_lhs - len(lhs))
 
                 line = f"{lhs}{' ' * pad} {op} {rhs}"
 
