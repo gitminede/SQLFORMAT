@@ -84,6 +84,148 @@ def _unshield_noformat_blocks(s: str, tokens: dict) -> str:
         s = s.replace(key, val)
     return s
 
+def _normalize_parenthesized_where_blocks(s: str) -> str:
+    """
+    WHERE    ( ... AND ... AND ... ) blokk szétbontása több sorra.
+    - Csak akkor aktiválódik, ha a WHERE sor rest-je '('-el kezdődik és
+      a külső (depth=1) szinten tartalmaz AND/OR kötőszót.
+    - Nem bont bele belső zárójelekbe (pl. IN ( SELECT ... )).
+    - A szétszedett feltételekben normalizálja az =, <>, !=, >=, <=, >, < operátorok körüli spacinget 1 space-re.
+    """
+    lines = s.split("\n")
+    out = []
+    rx_where = re.compile(r"^(?P<ws>\s*)WHERE\s{4}(?P<rest>.*)$", re.IGNORECASE)
+
+    def normalize_ops(expr: str) -> str:
+        # 1 space az alap összehasonlító operátorok körül
+        x = expr.strip()
+        x = re.sub(r"\s*(>=|<=|<>|!=|=|>|<)\s*", r" \1 ", x)
+        x = re.sub(r"\s+", " ", x).strip()
+        return x
+
+    def split_top_level_bool(inner: str):
+        """
+        inner: zárójelen belüli rész (a külső '(' ')' nélkül)
+        split AND/OR szerint csak depth=0-nál (inner szinten).
+        Vissza: [ (None, cond1), ('AND', cond2), ('OR', cond3), ... ]
+        """
+        parts = []
+        buf = []
+        depth = 0
+
+        i = 0
+        n = len(inner)
+
+        def starts_kw(pos: int, kw: str) -> bool:
+            # szóhatáros illesztés: whitespace + kw + whitespace
+            end = pos + len(kw)
+            if end > n:
+                return False
+            if inner[pos:end].lower() != kw.lower():
+                return False
+            left_ok = (pos == 0) or inner[pos - 1].isspace()
+            right_ok = (end == n) or inner[end].isspace()
+            return left_ok and right_ok
+
+        current_op = None
+
+        while i < n:
+            ch = inner[i]
+            if ch == "(":
+                depth += 1
+                buf.append(ch)
+                i += 1
+                continue
+            if ch == ")":
+                depth = max(depth - 1, 0)
+                buf.append(ch)
+                i += 1
+                continue
+
+            if depth == 0:
+                # AND / OR felismerés
+                if starts_kw(i, "and"):
+                    cond = "".join(buf).strip()
+                    if cond:
+                        parts.append((current_op, cond))
+                    buf = []
+                    current_op = "AND"
+                    i += 3
+                    continue
+                if starts_kw(i, "or"):
+                    cond = "".join(buf).strip()
+                    if cond:
+                        parts.append((current_op, cond))
+                    buf = []
+                    current_op = "OR"
+                    i += 2
+                    continue
+
+            buf.append(ch)
+            i += 1
+
+        tail = "".join(buf).strip()
+        if tail:
+            parts.append((current_op, tail))
+
+        # első elem op-ja legyen None
+        if parts:
+            parts[0] = (None, parts[0][1])
+        return parts
+
+    for ln in lines:
+        m = rx_where.match(ln)
+        if not m:
+            out.append(ln)
+            continue
+
+        ws = m.group("ws")
+        rest = m.group("rest").lstrip()
+
+        # Csak a "WHERE ( ... )" formát bontjuk
+        if not rest.startswith("("):
+            out.append(ln)
+            continue
+
+        # Keressük a teljes külső zárójelet ugyanazon sorban
+        # (ha több soros már, nem nyúlunk itt hozzá)
+        if rest.count("(") == 0 or rest.count(")") == 0:
+            out.append(ln)
+            continue
+
+        # Megpróbáljuk a külső zárójelet levágni, ha a sor végén van ')'
+        # pl: "( a and b and c )"
+        stripped = rest.strip()
+        if not (stripped.startswith("(") and stripped.endswith(")")):
+            out.append(ln)
+            continue
+
+        inner = stripped[1:-1].strip()
+
+        # Ha nincs top-level AND/OR, nincs mit bontani
+        parts = split_top_level_bool(inner)
+        if len(parts) <= 1:
+            out.append(ln)
+            continue
+
+        # Indentek:
+        head_prefix = ws + "WHERE    "
+        cont_prefix = ws + (" " * len("WHERE    ")) + "  "  # 2 space: a "( " oszlopáig
+
+        # Első sor: WHERE    ( <cond1>
+        first_cond = normalize_ops(parts[0][1])
+        out.append(f"{head_prefix}( {first_cond}")
+
+        # Következő sorok: <cont_prefix>AND/OR <cond>
+        for op, cond in parts[1:]:
+            cond_norm = normalize_ops(cond)
+            out.append(f"{cont_prefix}{op} {cond_norm}")
+
+        # Záró ) külön sorban, a "( " alá (11 space)
+        out.append(f"{cont_prefix})")
+        continue
+
+    return "\n".join(out)
 
 def _shield_comments_and_strings(s: str):
     """
@@ -981,6 +1123,9 @@ def format_sql(sql: str) -> str:
     # JOIN/ON indent + ON spacing
     s = _normalize_join_on_indent(s)
     s = _normalize_on_spacing(s)
+
+    # >>> EZ ÚJ (D előtt, WHERE align előtt):
+    s = _normalize_parenthesized_where_blocks(s)
 
     # SELECT listák (balvessző + '=' igazítás)
     s = _normalize_select_list_commas(s)
