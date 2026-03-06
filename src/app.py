@@ -23,6 +23,14 @@ def format_sql(sql: str) -> str:
     # CRLF normalizálás (ne legyenek \r-ek)
     s = sql.replace("\r", "")
 
+    
+    # (1) formatting off/on blokkok pajzsolása – MINDIG elsőként
+    s, nofmt_tokens = _shield_noformat_blocks(s)
+    
+    # (2) komment + string pajzs (a B)
+    s, tokens = _shield_comments_and_strings(s)
+
+    
     # 0) Pajzs: kommentek + stringek kivétele
     s, tokens = _shield_comments_and_strings(s)
 
@@ -138,6 +146,75 @@ def _normalize_join_on_indent(s: str) -> str:
         out.append(ln)
 
     return "\n".join(out)
+
+def _shield_noformat_blocks(s: str):
+    """
+    Kihagyható (no-format) blokkok pajzsolása.
+
+    A két marker között:
+      -- formatting off
+      ...
+      -- formatting on
+
+    a '...' rész érintetlenül marad: placeholderre cseréljük formázás előtt,
+    majd a végén visszaállítjuk.
+
+    Visszaad: (shielded_text, tokens)
+    """
+    lines = s.splitlines(True)  # newline megőrzése
+    tokens = {}
+    out = []
+    buf = []
+    in_off = False
+    token_id = 0
+
+    rx_off = re.compile(r"^\s*--\s*formatting\s+off\s*$", re.IGNORECASE)
+    rx_on = re.compile(r"^\s*--\s*formatting\s+on\s*$", re.IGNORECASE)
+
+    def flush_buf():
+        nonlocal token_id
+        if not buf:
+            return
+        token_id += 1
+        key = f"__EBH_NOFMT_{token_id:06d}__"
+        tokens[key] = "".join(buf)
+        out.append(key + "\n")  # token külön sorban legyen
+        buf.clear()
+
+    for ln in lines:
+        # marker sorokat mindig érintetlenül hagyjuk
+        if rx_off.match(ln.rstrip("\n")):
+            # ha már volt gyűjtés, flush
+            flush_buf()
+            in_off = True
+            out.append(ln)
+            continue
+
+        if rx_on.match(ln.rstrip("\n")):
+            flush_buf()
+            in_off = False
+            out.append(ln)
+            continue
+
+        if in_off:
+            buf.append(ln)
+        else:
+            out.append(ln)
+
+    # ha fájl végéig OFF-ban maradtunk
+    flush_buf()
+
+    return "".join(out), tokens
+
+
+def _unshield_noformat_blocks(s: str, tokens: dict) -> str:
+    """
+    No-format placeholder-ek visszacserélése az eredeti (érintetlen) tartalomra.
+    """
+    for key, val in tokens.items():
+        s = s.replace(key + "\n", val)  # mi így tettük be (token + \n)
+        s = s.replace(key, val)         # biztos ami biztos
+    return s
 
 def _normalize_set_lists(s: str) -> str:
     """
