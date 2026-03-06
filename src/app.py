@@ -57,7 +57,8 @@ def format_sql(sql: str) -> str:
 
     # 9) CREATE TABLE oszlop/típus igazítás (A pontból)
     s = _align_create_table_columns(s)
-
+    s = _align_cte_closing_paren(
+    s = _normalize_values_list(s)
     # 10) Pajzs vissza:ek + stringek eredetije
     s = _unshield(s, tokens)
 
@@ -316,6 +317,90 @@ def _normalize_on_spacing(s: str) -> str:
             rest2 = norm_expr(m2.group("rest"))
             out.append(f"{ws2}{kw} {rest2}")
             i += 1
+
+    return "\n".join(out)
+def _normalize_values_list(s: str) -> str:
+    """
+    VALUES blokkok sorainak EBH-stílusú igazítása.
+
+    Elv:
+      VALUES
+               ( ... )
+             , ( ... )
+             , ( ... )
+
+    - a VALUES utáni első tuple sor indentjét vesszük alapnak
+    - a következő sorok: ugyanarra az indentre kerüljenek, bal oldali vesszővel: '<indent>, ( ... )'
+    - csak azokra a sorokra hat, amelyek VALUES után közvetlenül tuple-ok: ( ... ) vagy , ( ... )
+    """
+    lines = s.split("\n")
+    out = []
+    i = 0
+
+    rx_values = re.compile(r"^\s*VALUES\s*$", re.IGNORECASE)
+    rx_tuple_line = re.compile(r"^(?P<ws>\s*)(?P<comma>,\s*)?\(\s*.*$", re.IGNORECASE)
+
+    while i < len(lines):
+        if not rx_values.match(lines[i]):
+            out.append(lines[i])
+            i += 1
+            continue
+
+        # VALUES sort kiírjuk
+        out.append(lines[i])
+        i += 1
+
+        # üres sorok átengedése, amíg el nem érünk az első tuple sorig
+        while i < len(lines) and lines[i].strip() == "":
+            out.append(lines[i])
+            i += 1
+
+        if i >= len(lines):
+            break
+
+        m_first = rx_tuple_line.match(lines[i])
+        if not m_first:
+            # nem klasszikus VALUES tuple lista -> nem nyúlunk hozzá
+            continue
+
+        base_ws = m_first.group("ws")
+        comma_ws = base_ws[:-2] if len(base_ws) >= 2 else base_ws  # a te mintád: ', ' sorok 2-vel balrább
+        # első sor: vessző nélkül
+        first_line = base_ws + lines[i].lstrip().lstrip(",").lstrip()
+        out.append(first_line)
+        i += 1
+
+        # további sorok: ', (' sorok igazítása
+        while i < len(lines):
+            ln = lines[i]
+            if ln.strip() == "":
+                out.append(ln)
+                i += 1
+                continue
+
+            m = rx_tuple_line.match(ln)
+            if not m:
+                # kiléptünk a VALUESából
+                break
+
+            # ha a sor elején van vessző, akkor kötelezően: "<comma_ws>, ( ... )"
+            stripped = ln.lstrip()
+            if stripped.startswith(","):
+                rest = stripped[1:].lstrip()
+                out.append(f"{comma_ws}, {rest}")
+            else:
+                # ha nincs vessző (ritkább), hagyjuk az alap indenttel
+                out.append(base_ws + stripped)
+
+            i += 1
+
+        # a while fent megállt egy nem-tuple soron -> az outer loop folytatja onnan
+        continue
+
+    # maradék sorok (ha i < len(lines) és a while nem futott le teljesen)
+    while i < len(lines):
+        out.append(lines[i])
+        i += 1
 
     return "\n".join(out)
 
