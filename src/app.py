@@ -57,7 +57,7 @@ def format_sql(sql: str) -> str:
 
     # 9) CREATE TABLE oszlop/típus igazítás (A pontból)
     s = _align_create_table_columns(s)
-    s = _align_cte_closing_paren(
+    s = _align_cte_closing_paren(s)
     s = _normalize_values_list(s)
     # 10) Pajzs vissza:ek + stringek eredetije
     s = _unshield(s, tokens)
