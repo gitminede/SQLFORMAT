@@ -77,7 +77,86 @@ def _shield_noformat_blocks(s: str):
 
     flush_buf()
     return "".join(out), tokens
+    
+def _normalize_in_subquery_blocks(s: str) -> str:
+    """
+    EBH-stílus:
+    AND x IN (
+    SELECT ...
+    FROM ...
+    WHERE ...
+    )
+    ->
+    AND x IN ( SELECT ...
+               FROM ...
+               WHERE ...
+             )
 
+    - Csak azokat a blokkokat kezeli, ahol a sor IN ( -re végződik (nincs utána más),
+      és a következő nem üres sor SELECT-kel indul.
+    - A záró ')' sort azonos indentre húzza (a subquery blokk alá).
+    """
+    lines = s.split("\n")
+    out = []
+    i = 0
+
+    rx_in_open = re.compile(r"^(?P<ws>\s*)(?P<prefix>.*\b(NOT\s+IN|IN)\s*\()\s*$", re.IGNORECASE)
+    rx_select_line = re.compile(r"^\s*SELECT\s{3}\b", re.IGNORECASE)
+    rx_close = re.compile(r"^\s*\)\s*[,;]?\s*$")
+
+    while i < len(lines):
+        m = rx_in_open.match(lines[i])
+        if not m:
+            out.append(lines[i])
+            i += 1
+            continue
+
+        ws = m.group("ws")
+        prefix = m.group("prefix").rstrip()  # "... IN ("
+
+        # következő nem üres sor
+        j = i + 1
+        while j < len(lines) and lines[j].strip() == "":
+            j += 1
+        if j >= len(lines) or not rx_select_line.match(lines[j]):
+            out.append(lines[i])
+            i += 1
+            continue
+
+        # subquery első sora a zárójel után ugyanazon sorba
+        first = lines[j].strip()
+        out.append(f"{ws}{prefix} {first}")
+
+        # indent: pontosan oda, ahol a SELECT kezdődik (prefix + space után)
+        indent_len = len(ws) + len(prefix) + 1
+        indent = " " * indent_len
+
+        # a subquery további sorai a záró ')' sorig
+        k = j + 1
+        while k < len(lines):
+            ln = lines[k]
+
+            # üres sor maradhat, de a példád szerint inkább nincs — átengedjük
+            if ln.strip() == "":
+                out.append(ln)
+                k += 1
+                continue
+
+            if rx_close.match(ln):
+                # záró ) ugyanarra az indentre
+                tail = ln.strip()[1:].strip()  # ) utáni ,/; ha van
+                if tail and re.fullmatch(r"[,;]{1,2}", tail):
+                    out.append(f"{indent}){tail}")
+                else:
+                    out.append(f"{indent})")
+                k += 1
+                break
+
+            out.append(indent + ln.strip())
+            k += 1
+
+        i = k
+    return "\n".join(out)
 def _split_top_level_and_or(expr: str):
     """
     Top-level (zárójel-depth 0) AND/OR mentén darabol.
@@ -1295,6 +1374,9 @@ def format_sql(sql: str) -> str:
     # JOIN/ON indent + ON spacing
     s = _normalize_join_on_indent(s)
     s = _normalize_on_spacing(s)
+
+    # ÚJ: IN (subquery) blokk összehúzás + indent
+    s = _normalize_in_subquery_blocks(s)
 
     # >>> EZ ÚJ (D előtt, WHERE align előtt):
     s = _normalize_parenthesized_where_blocks(s)
