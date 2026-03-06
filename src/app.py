@@ -78,6 +78,175 @@ def _shield_noformat_blocks(s: str):
     flush_buf()
     return "".join(out), tokens
 
+def _split_top_level_and_or(expr: str):
+    """
+    Top-level (zárójel-depth 0) AND/OR mentén darabol.
+    Pajzs mellett biztonságos (stringek/kommentek már placeholder-ek).
+    Visszaad: [("HEAD","cond"), ("AND","cond2"), ("OR","cond3"), ...]
+    """
+    s = expr.strip()
+    parts = []
+    buf = []
+    depth = 0
+    i = 0
+    n = len(s)
+
+    def is_word_char(c: str) -> bool:
+        return c.isalnum() or c == "_"
+
+    while i < n:
+        ch = s[i]
+        if ch == "(":
+            depth += 1
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == ")":
+            depth = max(depth - 1, 0)
+            buf.append(ch)
+            i += 1
+            continue
+
+        if depth == 0:
+            # AND / OR felismerés szóhatárral
+            if (i + 3 <= n) and s[i:i+3].upper() == "AND":
+                prev_ok = (i == 0) or (not is_word_char(s[i-1]))
+                next_ok = (i + 3 == n) or (not is_word_char(s[i+3]))
+                if prev_ok and next_ok:
+                    chunk = "".join(buf).strip()
+                    if chunk:
+                        parts.append(("HEAD" if not parts else "AND", chunk))
+                    buf = []
+                    i += 3
+                    # opcionális whitespace átugrás
+                    while i < n and s[i].isspace():
+                        i += 1
+                    continue
+
+            if (i + 2 <= n) and s[i:i+2].upper() == "OR":
+                prev_ok = (i == 0) or (not is_word_char(s[i-1]))
+                next_ok = (i + 2 == n) or (not is_word_char(s[i+2]))
+                if prev_ok and next_ok:
+                    chunk = "".join(buf).strip()
+                    if chunk:
+                        parts.append(("HEAD" if not parts else "OR", chunk))
+                    buf = []
+                    i += 2
+                    while i < n and s[i].isspace():
+                        i += 1
+                    continue
+
+        buf.append(ch)
+        i += 1
+
+    tail = "".join(buf).strip()
+    if tail:
+        parts.append(("HEAD" if not parts else parts[-1][0] if False else "AND", tail))
+
+    # a fenti tail hozzáadásnál a kw nem számít, inkább javítsuk:
+    # első elem HEAD, továbbiak eredeti AND/OR-ral jönnek -> egyszerűsítünk:
+    # ha csak 1 elem van, az HEAD; ha több, az első HEAD, a többit úgy hagyjuk, ahogy szétvált
+    if parts:
+        parts[0] = ("HEAD", parts[0][1])
+    return parts
+
+
+def _explode_where_lines_and_indent_in_blocks(s: str) -> str:
+    """
+    1) WHERE sorokból top-level AND/OR mentén több sort csinál (EBH indenttel).
+    2) IN ( / NOT IN ( esetén a belső blokkot egységesen behúzza,
+       és a záró ')' a nyitó '(' alá kerül.
+
+    FONTOS: Ez a lépés az operátor-oszlop igazítás előtt fusson!
+    """
+    lines = s.split("\n")
+    out = []
+    i = 0
+
+    rx_where = re.compile(r"^(?P<ws>\s*)WHERE\s{4}(?P<rest>.*)$", re.IGNORECASE)
+
+    # IN ( blokk kezdete a sor végén
+    rx_in_open = re.compile(r"^(?P<lhs>.*?\b(?:NOT\s+IN|IN))\s*\(\s*$", re.IGNORECASE)
+    # záró ) sor (önálló)
+    rx_close_only = re.compile(r"^\s*\)\s*[,;]?\s*$")
+
+    while i < len(lines):
+        m = rx_where.match(lines[i])
+        if not m:
+            out.append(lines[i])
+            i += 1
+            continue
+
+        ws = m.group("ws")
+        rest = m.group("rest").strip()
+
+        # 1) WHERE szétdarabolás
+        parts = _split_top_level_and_or(rest)
+
+        # WHERE HEAD sor
+        out.append(f"{ws}WHERE    {parts[0][1]}")
+        # AND/OR sorok ugyanarra a „feltétel oszlopra”
+        cond_ws = ws + (" " * len("WHERE    "))
+        for kw, cond in parts[1:]:
+            out.append(f"{cond_ws}{kw} {cond}")
+
+        i += 1
+
+        # 2) Ha a következő sorok közvetlenül a WHERE-hez tartoztak inline formában, akkor már nincs AND/OR sor a bemenetben.
+        #    Viszont ha a bemenetben voltak már AND sorok, itt nem vettük át őket.
+        #    Ezért csak a *közvetlen* WHERE sort kezeljük; a meglévő AND sorokat a későbbi igazítók kezelik.
+
+    # 3) IN blokkok indentálása: második passz a már szétdarabolt szövegen
+    lines2 = "\n".join(out).split("\n")
+    out2 = []
+    j = 0
+
+    while j < len(lines2):
+        line = lines2[j]
+        # keressünk egy "IN (" sorvéget (akár WHERE/AND/OR sorban)
+        m_in = rx_in_open.match(line.strip())
+        if not m_in:
+            out2.append(line)
+            j += 1
+            continue
+
+        # A nyitó '(' oszlop (a sorban a '(' helye)
+        open_paren_col = line.find("(")
+        if open_paren_col < 0:
+            out2.append(line)
+            j += 1
+            continue
+
+        # Belső indent: a nyitó '(' alá + 9 space (EBH-szerű blokk)
+        inner_ws = " " * (open_paren_col + 9)
+        close_ws = " " * open_paren_col
+
+        out2.append(line.rstrip())  # IN ( sor
+
+        j += 1
+        # gyűjtjük a blokkot a hozzá tartozó záró ) sorig (egyszerű, de jó: első önálló )-ig)
+        while j < len(lines2):
+            if rx_close_only.match(lines2[j]):
+                # záró ) igazítva
+                tail = lines2[j].strip()[1:].strip()  # ) utáni , ; ha van
+                if tail and re.fullmatch(r"[,;]{1,2}", tail):
+                    out2.append(f"{close_ws}){tail}")
+                else:
+                    out2.append(f"{close_ws})" + ((" " + tail) if tail else ""))
+                j += 1
+                break
+
+            # belső sorok: bal oldali whitespace csere inner_ws-re
+            if lines2[j].strip() == "":
+                out2.append(lines2[j])
+            else:
+                out2.append(inner_ws + lines2[j].lstrip())
+            j += 1
+
+        continue
+
+    return "\n".join(out2)
+
 
 def _unshield_noformat_blocks(s: str, tokens: dict) -> str:
     for key, val in tokens.items():
@@ -1119,6 +1288,9 @@ def format_sql(sql: str) -> str:
 
     # SELECT ... FROM egy sorban -> szét
     s = _split_select_from(s)
+
+    # ÚJ: WHERE tördelés + IN blokk indent
+    s = _explode_where_lines_and_indent_in_blocks(s)
 
     # JOIN/ON indent + ON spacing
     s = _normalize_join_on_indent(s)
