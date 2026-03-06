@@ -57,6 +57,11 @@ def format_sql(sql: str) -> str:
     # 7) WHERE operátor-oszlop igazítás (csak WHERE, ON-t nem)
     s = _align_where_on_ops(s)
 
+    
+    s = _normalize_parenthesized_where_groups(s)  # <-- új
+    s = _normalize_set_lists(s)                   # <-- ú
+
+
     # 8) CASE WHEN kompakt
     s = _compact_case_when(s)
 
@@ -133,6 +138,301 @@ def _normalize_join_on_indent(s: str) -> str:
         out.append(ln)
 
     return "\n".join(out)
+
+def _normalize_set_lists(s: str) -> str:
+    """
+    UPDATE SET / MERGE ... UPDATE SET lista EBH-stílusú formázása:
+
+    UPDATE t
+    SET    col1 = expr1
+         , col2 = expr2
+    WHERE ...
+
+    illetve MERGE esetén:
+    WHEN MATCHED THEN UPDATE
+    SET    col1 = expr1
+         , col2 = expr2
+
+    Szabályok:
+    - 'SET ' után az első assignment ugyanabban a sorban marad (SET prefix + első elem)
+    - további elemek balvesszősen: ', <assignment>'
+    - '=' oszlop igazítás a SET listában (lhs-ek alapján)
+    - nem bontjuk szét a vesszőket zárójel-depth > 0 esetén (pl. függvényhívások)
+    """
+    lines = s.split("\n")
+    out = []
+    i = 0
+
+    # SET sor felismerése
+    rx_set = re.compile(r"^(?P<ws>\s*)SET\s+(?P<rest>.*)$", re.IGNORECASE)
+
+    # hol ér véget a SET blokk
+    rx_break = re.compile(
+        r"^\s*(WHERE\b|FROM\b|OUTPUT\b|WHEN\b|GROUP\s+BY\b|ORDER\s+BY\b|HAVING\b|UNION\b|EXCEPT\b|INTERSECT\b|RETURN\b|;)\b",
+        re.IGNORECASE,
+    )
+
+    def split_top_level_csv(expr: str):
+        parts = []
+        buf = []
+        depth = 0
+        for ch in expr:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth = max(depth - 1, 0)
+            if ch == "," and depth == 0:
+                parts.append("".join(buf).strip())
+                buf = []
+            else:
+                buf.append(ch)
+        tail = "".join(buf).strip()
+        if tail:
+            parts.append(tail)
+        return parts
+
+    def parse_assignment(a: str):
+        # egyszerű assignment bontás a legelső '=' mentén (zárójel nélkül már shieldelt)
+        # ha nincs '=', None
+        if "=" not in a:
+            return None
+        left, right = a.split("=", 1)
+        return left.strip(), right.strip()
+
+    while i < len(lines):
+        m = rx_set.match(lines[i])
+        if not m:
+            out.append(lines[i])
+            i += 1
+            continue
+
+        ws = m.group("ws")
+        first_expr_col = len(ws) + len("SET ")  # SET után egy space már benne
+        comma_col = max(first_expr_col - 2, 0)
+        comma_ws = " " * comma_col
+        head_prefix = ws + "SET "
+
+        # 1) begyűjtjük a teljes SET listát (aktuális sor + következő vesszős sorok)
+        items_raw = []
+        rest0 = m.group("rest").strip()
+        items_raw.extend(split_top_level_csv(rest0))
+        i += 1
+
+        while i < len(lines):
+            ln = lines[i]
+            if ln.strip() == "":
+                # üres sort átengedjük, de SET listát lezárjuk (EBH-ban nem szokott üres sor a listában)
+                break
+            if rx_break.match(ln):
+                break
+
+            stripped = ln.strip()
+            # tipikus folytatás: ", something"
+            if stripped.startswith(","):
+                items_raw.extend(split_top_level_csv(stripped[1:].strip()))
+                i += 1
+                continue
+
+            # ha valaki vessző nélkül folytatta, tekintsük további elemnek
+            items_raw.extend(split_top_level_csv(stripped))
+            i += 1
+
+        if not items_raw:
+            out.append(lines[i])
+            continue
+
+        # 2) '=' oszlop igazítás (lhs max)
+        parsed = []
+        max_lhs = 0
+        for it in items_raw:
+            pr = parse_assignment(it)
+            if pr is None:
+                parsed.append((it, None))
+                continue
+            lhs, rhs = pr
+            max_lhs = max(max_lhs, len(lhs))
+            parsed.append((it, (lhs, rhs)))
+
+        # 3) kiírás
+        # első elem a SET sorban
+        first_it, first_parts = parsed[0]
+        if first_parts is None:
+            out.append(f"{head_prefix}{first_it}")
+        else:
+            lhs, rhs = first_parts
+            out.append(f"{head_prefix}{lhs.ljust(max_lhs)} = {rhs}")
+
+        # további elemek balvesszővel, egységes indenttel
+        for it, parts in parsed[1:]:
+            if parts is None:
+                out.append(f"{comma_ws}, {it}")
+            else:
+                lhs, rhs = parts
+                out.append(f"{comma_ws}, {lhs.ljust(max_lhs)} = {rhs}")
+
+        # a while loop már i-n áll a SET blokk utáni soron; outer folytatja
+        continue
+
+    return "\n".join(out)
+
+def _normalize_parenthesized_where_groups(s: str) -> str:
+    """
+    Zárójelezett WHERE csoportok tipikus EBH-formázása:
+      WHERE    ( cond1
+                 AND cond2 )
+               OR ( cond3 )
+
+    Csak a leggyakoribb esetekre lő:
+    - WHERE sorban a feltétel '('-sel indul, és a blokkon belül AND/OR sorok vannak
+    - OR top-level csoportokat is támogat (OR ( ... ) )
+
+    Megjegyzés:
+    - A stringek/kommentek már shieldeltek legyenek (B).
+    - Nem teljes SQL boolean pretty-printer, de a ti tipikus mintáitokat jól hozza.
+    """
+    lines = s.split("\n")
+    out = []
+    i = 0
+
+    rx_where = re.compile(r"^(?P<ws>\s*)WHERE\s{4}(?P<rest>.*)$", re.IGNORECASE)
+    rx_andor_line = re.compile(r"^(?P<ws>\s*)(AND|OR)\b(?P<rest>.*)$", re.IGNORECASE)
+
+    # belső AND split a zárójelen belül (depth 0)
+    def split_top_level_and(expr: str):
+        parts = []
+        buf = []
+        depth = 0
+        tokens = expr.strip()
+
+        # egyszerű tokenizálás: ' AND ' mentén depth=0-nál
+        j = 0
+        while j < len(tokens):
+            ch = tokens[j]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth = max(depth - 1, 0)
+
+            # AND szó keresés (depth=0)
+            if depth == 0 and tokens[j:j+4].upper() == "AND " and (j == 0 or tokens[j-1].isspace()):
+                parts.append("".join(buf).strip())
+                buf = []
+                j += 4
+                continue
+
+            buf.append(ch)
+            j += 1
+
+        tail = "".join(buf).strip()
+        if tail:
+            parts.append(tail)
+        return parts
+
+    # 1-space operátor normalizálás (egyszerű, de shield miatt biztonságos)
+    rx_sym = re.compile(r"\s*(>=|<=|<>|!=|=|>|<)\s*")
+    rx_notin = re.compile(r"\s+(NOT\s+IN|IN)\s+", re.IGNORECASE)
+
+    def norm_ops(x: str) -> str:
+        x = re.sub(r"\s+", " ", x.strip())
+        x = rx_notin.sub(lambda m: " " + re.sub(r"\s+", " ", m.group(1).upper()) + " ", x)
+        x = rx_sym.sub(r" \1 ", x)
+        x = re.sub(r"\s+", " ", x).strip()
+        return x
+
+    while i < len(lines):
+        m = rx_where.match(lines[i])
+        if not m:
+            out.append(lines[i])
+            i += 1
+            continue
+
+        ws = m.group("ws")
+        prefix = ws + "WHERE    "
+        rest = m.group("rest").lstrip()
+
+        # csak akkor nyúlunk hozzá, ha '('-sel indul
+        if not rest.startswith("("):
+            out.append(lines[i])
+            i += 1
+            continue
+
+        # levágjuk a külső zárójelet, ha a sorban már záródik
+        # (ha nem záródik, akkor is kezeljük)
+        rest_clean = rest
+
+        # Megpróbáljuk kinyerni a csoport tartalmát a sorból:
+        # "( ... )" -> "...", és jelöljük, hogy volt-e záró
+        had_close = rest_clean.rstrip().endswith(")")
+        inner = rest_clean.strip()
+        if inner.startswith("("):
+            inner = inner[1:].strip()
+        if inner.endswith(")"):
+            inner = inner[:-1].strip()
+
+        # belső AND szétválasztás
+        and_parts = split_top_level_and(inner)
+        if not and_parts:
+            out.append(lines[i])
+            i += 1
+            continue
+
+        # első feltétel kezdő oszlopa: prefix + "( " -> +2
+        cond_start_col = len(prefix) + 2
+        cond_ws = " " * cond_start_col
+
+        # kiírjuk az első sort: WHERE    ( <cond1>
+        out.append(prefix + "( " + norm_ops(and_parts[0]))
+        # további AND sorok: AND a cond_start_col alatt
+        for p in and_parts[1:]:
+            out.append(cond_ws + "AND " + norm_ops(p))
+
+        # záró ) a legutolsó sor végére
+        out[-1] = out[-1] + " )"
+
+        # Most átnézzük a következő sorokat, ha vannak top-level OR csoportok:
+        i += 1
+        while i < len(lines):
+            ln = lines[i]
+            m2 = rx_andor_line.match(ln)
+            if not m2:
+                break
+
+            kw = m2.group(2).upper()
+            r2 = m2.group("rest").strip()
+
+            # csak OR ( ... ) / AND ( ... ) csoportokat kezelünk itt
+            if not r2.startswith("("):
+                break
+
+            inner2 = r2.strip()
+            inner2 = inner2[1:].strip()
+            if inner2.endswith(")"):
+                inner2 = inner2[:-1].strip()
+
+            parts2 = split_top_level_and(inner2)
+
+            # OR keyword a WHERE után az első feltétel oszlop alá igazodjon (prefix nélküli rész)
+            # a te stílusodban az OR a feltétel oszlopa alá kerül (nem WHERE alá)
+            # ezért: ws + ' ' * len("WHERE    ") + 2 -> ugyanaz a cond_start_col
+            or_ws = " " * (len(ws) + len("WHERE    "))
+            # OR sor első: OR ( cond
+            out.append(or_ws + "OR ( " + norm_ops(parts2[0]) if parts2 else (or_ws + "OR " + r2))
+
+            if parts2:
+                # további AND sorok a csoportban
+                for p in parts2[1:]:
+                    out.append(cond_ws + "AND " + norm_ops(p))
+                out[-1] = out[-1] + " )"
+
+            i += 1
+
+        continue
+
+    return "\n".join(out)
+
+
+
+
 def _normalize_select_list_commas(s: str) -> str:
     """
     SELECT lista balvesszőssé alakítása:
