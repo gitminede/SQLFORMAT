@@ -26,6 +26,11 @@ def format_sql(sql: str) -> str:
     # 0) Pajzs: kommentek + stringek kivétele
     s, tokens = _shield_comments_and_strings(s)
 
+
+    s = _split_select_from(s)
+    s = _uppercase_order_group(s)
+
+
     # 1) HTML entity visszaalakítás (MOST már biztonságos, mert string/komment nem érintett)
     for rx, repl in _RX_HTML:
         s = rx.sub(repl, s)
@@ -323,6 +328,37 @@ def _normalize_on_spacing(s: str) -> str:
 
     return "\n".join(out)
 
+def _uppercase_order_group(s: str) -> str:
+    s = re.sub(r"\border\s+by\b", "ORDER BY", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bgroup\s+by\b", "GROUP BY", s, flags=re.IGNORECASE)
+    return s
+    
+def _split_select_from(s: str) -> str:
+    """
+    EBH-stílus: a SELECT és FROM SOHA nem lehet egy sorban.
+    Ha ilyen:    SELECT   * FROM     aaa a
+    akkor legyen:
+                 SELECT   *
+                 FROM     aaa a
+    """
+    lines = s.split("\n")
+    out = []
+    rx_sel_from = re.compile(r"^(?P<ws>\s*)SELECT\s+(?P<sel>.+?)\s+FROM\s+(?P<from>.+)$", re.IGNORECASE)
+
+    for ln in lines:
+        m = rx_sel_from.match(ln)
+        if not m:
+            out.append(ln)
+            continue
+
+        ws = m.group("ws")
+        sel = m.group("sel").rstrip()
+        frm = m.group("from").rstrip()
+        out.append(f"{ws}SELECT   {sel}")
+        out.append(f"{ws}FROM     {frm}")
+
+    return "\n".join(out)
+    
 def _normalize_group_order_by_lists(s: str) -> str:
     """
     GROUP BY / ORDER BY lista EBH-stílusú formázása:
