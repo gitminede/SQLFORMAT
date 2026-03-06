@@ -77,7 +77,74 @@ def _shield_noformat_blocks(s: str):
 
     flush_buf()
     return "".join(out), tokens
-    
+def _normalize_where_continuation_and_or(s: str) -> str:
+    """
+    A WHERE blokkban az elszabadult AND/OR sorokat is az AND-oszlop alá húzza,
+    még akkor is, ha közben volt több soros feltétel (pl. IN ( SELECT ... )).
+
+    Csak a WHERE *fő szintjén* (paren depth == 0) igazít.
+    """
+    lines = s.split("\n")
+    out = []
+    i = 0
+
+    rx_where = re.compile(r"^(?P<ws>\s*)WHERE\s{4}(?P<rest>.*)$", re.IGNORECASE)
+    rx_andor = re.compile(r"^(?P<ws>\s*)(?P<kw>AND|OR)\b(?P<rest>.*)$", re.IGNORECASE)
+
+    # WHERE blokk vége (új clause)
+    rx_break = re.compile(
+        r"^\s*(GROUP\s+BY\b|ORDER\s+BY\b|HAVING\b|UNION\b|EXCEPT\b|INTERSECT\b|INSERT\b|UPDATE\b|DELETE\b|MERGE\b|WITH\b|RETURN\b)\b",
+        re.IGNORECASE,
+    )
+
+    def paren_delta(line: str) -> int:
+        # pajzs mellett elég egyszerűen számolni
+        return line.count("(") - line.count(")")
+
+    while i < len(lines):
+        m = rx_where.match(lines[i])
+        if not m:
+            out.append(lines[i])
+            i += 1
+            continue
+
+        # WHERE sor megy változatlanul
+        out.append(lines[i])
+
+        head_ws = m.group("ws")
+        cond_start_prefix = head_ws + (" " * len("WHERE    "))
+
+        i += 1
+        depth = 0
+
+        while i < len(lines):
+            ln = lines[i]
+            if rx_break.match(ln):
+                break
+
+            # depth-et frissítjük az előző sor alapján is, de egyszerűbb soronként
+            # előbb igazítunk, aztán frissítünk – mindegy, csak konzisztens legyen
+            m_andor = rx_andor.match(ln)
+
+            if m_andor and depth == 0:
+                kw = m_andor.group("kw").upper()
+                rest = m_andor.group("rest").strip()
+                out.append(f"{cond_start_prefix}{kw} {rest}")
+            else:
+                out.append(ln)
+
+            depth += paren_delta(ln)
+            if depth < 0:
+                depth = 0
+
+            i += 1
+
+        # nem nyeljük el a break sort, outer loop kezeli
+        continue
+
+    return "\n".join(out)
+
+
 def _normalize_in_subquery_blocks(s: str) -> str:
     """
     EBH-stílus:
@@ -1387,7 +1454,7 @@ def format_sql(sql: str) -> str:
 
     # WHERE igazítás (csak WHERE)
     s = _align_where_on_ops(s)
-
+    s = _normalize_where_continuation_and_or(s)  # <-- ez húzza be az elszabadult AND-ot
     # CASE
     s = _compact_case_when(s)
 
