@@ -82,9 +82,9 @@ def format_sql(sql: str) -> str:
     s = _normalize_update_set_list(s)   # <-- UPDATE SET patch
     # 10) Pajzs vissza:ek + stringek eredetije
     s = _unshield(s, tokens)
-if "__EBH_SHIELD_" in s:
-    raise RuntimeError("UNSHIELD nem futott le vagy hibás: placeholder maradt a kimenetben")
-return s.rstrip() + "\n"
+    if "__EBH_SHIELD_" in s:
+        raise RuntimeError("UNSHIELD nem futott le vagy hibás: placeholder maradt a kimenetben")
+    return s.rstrip() + "\n"
 
 
 
