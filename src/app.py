@@ -59,6 +59,7 @@ def format_sql(sql: str) -> str:
     s = _align_create_table_columns(s)
     s = _align_cte_closing_paren(s)
     s = _normalize_values_list(s)
+    s = _normalize_insert_column_list(s)
     # 10) Pajzs vissza:ek + stringek eredetije
     s = _unshield(s, tokens)
 
@@ -319,6 +320,99 @@ def _normalize_on_spacing(s: str) -> str:
             i += 1
 
     return "\n".join(out)
+
+def _normalize_insert_column_list(s: str) -> str:
+    """
+    INSERT INTO ... ( oszloplista ) blokkokban:
+    - a sor eleji behúzást egységesíti
+    - a vesszők bal oldalon legyenek (', col')
+    - nem próbálja átírni a neveket, csak a vezető whitespace-t rendezi
+    """
+    lines = s.split("\n")
+    out = []
+    i = 0
+
+    rx_insert = re.compile(r"^\s*INSERT\s+INTO\b", re.IGNORECASE)
+    rx_open = re.compile(r"^\s*\(\s*$")
+    rx_close = re.compile(r"^\s*\)\s*$")
+
+    # egy oszlopsor: opcionális vessző + név
+    rx_col = re.compile(r"^(?P<ws>\s*)(?P<comma>,\s*)?(?P<name>\[[^\]]+\]|[A-Za-z0-9_#]+)\s*$")
+
+    while i < len(lines):
+        if not rx_insert.match(lines[i]):
+            out.append(lines[i])
+            i += 1
+            continue
+
+        # INSERT INTO sor
+        out.append(lines[i])
+        i += 1
+
+        # átengedjük az esetleges whitespace sorokat, míg el nem érjük a nyitó (
+        while i < len(lines) and lines[i].strip() == "":
+            out.append(lines[i])
+            i += 1
+
+        if i >= len(lines) or not rx_open.match(lines[i]):
+            # nincs klasszikus oszloplista
+            continue
+
+        # nyitó '(' sor
+        out.append(lines[i])
+        i += 1
+
+        # gyűjtjük az oszlop-sorokat a záró ')' sorig
+        block_start = i
+        col_line_indexes = []
+        base_ws = None  # az első oszlopsor behúzása lesz az alap
+
+        while i < len(lines) and not rx_close.match(lines[i]):
+            ln = lines[i]
+            m = rx_col.match(ln.strip() == "" and "" or ln)  # üres sorok maradnak
+            if m:
+                if base_ws is None:
+                    base_ws = m.group("ws")
+                col_line_indexes.append(i)
+            i += 1
+
+        # ha találtunk oszlopokat, normalizáljuk őket
+        if base_ws is not None and col_line_indexes:
+            for j in range(block_start, i):
+                ln = lines[j]
+                if j not in col_line_indexes:
+                    out.append(ln)
+                    continue
+
+                m = rx_col.match(ln)
+                if not m:
+                    out.append(ln)
+                    continue
+
+                name = m.group("name")
+                comma = m.group("comma")
+
+                if comma:
+                    out.append(f"{base_ws}, {name}")
+                else:
+                    out.append(f"{base_ws}{name}")
+
+        else:
+            # nem ismertük fel -> változatlanul
+            out.extend(lines[block_start:i])
+
+        # záró ')' sor
+        if i < len(lines) and rx_close.match(lines[i]):
+            out.append(lines[i])
+            i += 1
+
+    # maradék sorok (ha bármi bent maradt)
+    while i < len(lines):
+        out.append(lines[i])
+        i += 1
+
+    return "\n".join(out)
+
 def _normalize_values_list(s: str) -> str:
     """
     VALUES blokkok sorainak EBH-stílusú igazítása.
@@ -488,6 +582,7 @@ def _align_create_table_columns(s: str) -> str:
             i += 1
 
     return "\n".join(out)
+    
 def _shield_comments_and_strings(s: str):
     """
     Kiszedi (shieldeli) a kommenteket és string literálokat placeholder-ekre.
