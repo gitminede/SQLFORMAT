@@ -144,6 +144,117 @@ def _normalize_where_continuation_and_or(s: str) -> str:
         continue
 
     return "\n".join(out)
+def _normalize_from_list(s: str) -> str:
+    """
+    FROM blokk EBH-stílusban (SELECT-szerű lista):
+
+    FROM     t1 a
+           , t2 b
+           , t3 c
+
+    - A FROM soron belüli top-level vesszőkkel elválasztott forrásokat szétbontja.
+    - A vesszős sorok indentje: (FROM utáni első forrás kezdőoszlopa) - 2
+    - Nem nyúl a JOIN/ON külön sorokhoz (azt a JOIN/ON normalizáló kezeli).
+    - Csak a FROM első sorát alakítja, és a közvetlenül rákövetkező, vesszős
+      "forrás-sorokat" (ha vannak) igazítja.
+    """
+
+    lines = s.split("\n")
+    out = []
+    i = 0
+
+    rx_from = re.compile(r"^(?P<ws>\s*)FROM\s{5}(?P<rest>.*)$", re.IGNORECASE)
+
+    # Mikor ér véget a FROM blokk (új clause kezdődik)
+    rx_break = re.compile(
+        r"^\s*(WHERE\s{4}\b|GROUP\s+BY\b|ORDER\s+BY\b|HAVING\b|UNION\b|EXCEPT\b|INTERSECT\b|INSERT\b|UPDATE\b|DELETE\b|MERGE\b|WITH\b|RETURN\b)\b",
+        re.IGNORECASE,
+    )
+
+    # JOIN/ON sorok: ezekhez nem nyúlunk itt (külön normalizáló kezeli)
+    rx_joinish = re.compile(
+        r"^\s*(INNER\s+JOIN|LEFT\s+(?:OUTER\s+)?JOIN|RIGHT\s+(?:OUTER\s+)?JOIN|FULL\s+(?:OUTER\s+)?JOIN|CROSS\s+APPLY|OUTER\s+APPLY|JOIN|ON)\b",
+        re.IGNORECASE,
+    )
+
+    def split_top_level_csv(expr: str):
+        parts = []
+        buf = []
+        depth = 0
+        for ch in expr:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth = max(depth - 1, 0)
+            if ch == "," and depth == 0:
+                parts.append("".join(buf).strip())
+                buf = []
+            else:
+                buf.append(ch)
+        tail = "".join(buf).strip()
+        if tail:
+            parts.append(tail)
+        return parts
+
+    while i < len(lines):
+        m = rx_from.match(lines[i])
+        if not m:
+            out.append(lines[i])
+            i += 1
+            continue
+
+        ws = m.group("ws")
+        rest = m.group("rest").strip()
+
+        # Első forrás kezdőoszlopa: ws + "FROM     " (9 char)
+        first_expr_col = len(ws) + len("FROM     ")
+        comma_ws = " " * max(first_expr_col - 2, 0)
+
+        # Ha a FROM sorban több forrás van vesszővel, szétbontjuk.
+        items = split_top_level_csv(rest)
+
+        if not items:
+            out.append(lines[i])
+            i += 1
+            continue
+
+        # első sor
+        out.append(f"{ws}FROM     {items[0]}")
+
+        # további elemek ugyanebben a FROM sorban -> balvesszős sorok
+        for item in items[1:]:
+            out.append(f"{comma_ws}, {item}")
+
+        i += 1
+
+        # Ha a következő sorokban már voltak forrás-sorok (pl. elcsúszott ", t2"),
+        # igazítsuk őket is – de ne nyúljunk JOIN/ON sorokhoz, és álljunk meg clause váltásnál.
+        while i < len(lines):
+            ln = lines[i]
+
+            if ln.strip() == "":
+                out.append(ln)
+                i += 1
+                continue
+
+            if rx_break.match(ln) or rx_joinish.match(ln):
+                break
+
+            stripped = ln.strip()
+            if stripped.startswith(","):
+                out.append(f"{comma_ws}, {stripped[1:].strip()}")
+                i += 1
+                continue
+
+            # ha vessző nélkül jött forrás-sor, tegyük balvesszőssé
+            out.append(f"{comma_ws}, {stripped}")
+            i += 1
+
+        # outer loop folytatja innen
+        continue
+
+    return "\n".join(out)
+
 
 def _align_in_subquery_closing_paren(s: str) -> str:
     """
@@ -1563,7 +1674,7 @@ def format_sql(sql: str) -> str:
 
     # ÚJ: WHERE tördelés + IN blokk indent
     s = _explode_where_lines_and_indent_in_blocks(s)
-
+    s = _normalize_from_list(s)
     # JOIN/ON indent + ON spacing
     s = _normalize_join_on_indent(s)
     s = _normalize_on_spacing(s)
