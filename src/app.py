@@ -887,40 +887,35 @@ def _align_where_on_ops(s: str) -> str:
 
 def _normalize_on_spacing(s: str) -> str:
     """
-    ON (és az ON alatti AND/OR) feltételekben:
-    - az operátorok körül 1 szóköz legyen
-    - NOT IN / IN között is 1 szóköz logikusan: 'lhs NOT IN ( ... )'
-    - NINCS oszlopos igazítás (nem padolunk)
+    ON sor(ok)ban operátor körül 1 space, de ÚJSOROKHOZ nem nyúl.
+    Csak a soron belüli space/tab normalizálás.
     """
     lines = s.split("\n")
     out = []
-    i = 0
 
     rx_on = re.compile(r"^(?P<ws>\s*)ON\s+(?P<rest>.*)$", re.IGNORECASE)
     rx_andor = re.compile(r"^(?P<ws>\s*)(?P<kw>AND|OR)\s+(?P<rest>.*)$", re.IGNORECASE)
 
-    # szimbolikus operátorok köré 1 space
-    rx_sym = re.compile(r"\s*(>=|<=|<>|!=|=|>|<)\s*")
-    # IN/NOT IN/LIKE/BETWEEN/IS NULL alakok
-    rx_wordops = [
-        (re.compile(r"\s+(NOT\s+IN|IN)\s+", re.IGNORECASE), lambda m: f" {re.sub(r'\\s+', ' ', m.group(1).upper())} "),
-        (re.compile(r"\s+(NOT\s+LIKE|LIKE)\s+", re.IGNORECASE), lambda m: f" {re.sub(r'\\s+', ' ', m.group(1).upper())} "),
-        (re.compile(r"\s+(IS\s+NOT\s+NULL|IS\s+NULL)\b", re.IGNORECASE), lambda m: f" {re.sub(r'\\s+', ' ', m.group(1).upper())}"),
-        (re.compile(r"\s+(BETWEEN)\s+", re.IGNORECASE), lambda m: " BETWEEN "),
+    rx_sym = re.compile(r"[ \t]*(>=|<=|<>|!=|=|>|<)[ \t]*")
+    rx_word = [
+        (re.compile(r"[ \t]+(NOT[ \t]+IN|IN)[ \t]+", re.IGNORECASE),
+         lambda m: f" {re.sub(r'[ \t]+', ' ', m.group(1).upper())} "),
+        (re.compile(r"[ \t]+(NOT[ \t]+LIKE|LIKE)[ \t]+", re.IGNORECASE),
+         lambda m: f" {re.sub(r'[ \t]+', ' ', m.group(1).upper())} "),
+        (re.compile(r"[ \t]+(IS[ \t]+NOT[ \t]+NULL|IS[ \t]+NULL)\b", re.IGNORECASE),
+         lambda m: f" {re.sub(r'[ \t]+', ' ', m.group(1).upper())}"),
+        (re.compile(r"[ \t]+BETWEEN[ \t]+", re.IGNORECASE), lambda m: " BETWEEN "),
     ]
 
     def norm_expr(expr: str) -> str:
-        # összespacelés 1-re (de stringek védelme még nincs – később B pontnál hozzuk)
-        x = re.sub(r"\s+", " ", expr.strip())
-        # word operátorok
-        for rx, repl in rx_wordops:
+        x = re.sub(r"[ \t]+", " ", expr.strip())  # <-- csak space/tab!
+        for rx, repl in rx_word:
             x = rx.sub(repl, x)
-        # szimbolikus operátorok
         x = rx_sym.sub(r" \1 ", x)
-        # többszörös space vissza 1-re
-        x = re.sub(r"\s+", " ", x).strip()
+        x = re.sub(r"[ \t]+", " ", x).strip()
         return x
 
+    i = 0
     while i < len(lines):
         m = rx_on.match(lines[i])
         if not m:
@@ -929,19 +924,17 @@ def _normalize_on_spacing(s: str) -> str:
             continue
 
         ws = m.group("ws")
-        rest = norm_expr(m.group("rest"))
-        out.append(f"{ws}ON {rest}")
+        out.append(f"{ws}ON {norm_expr(m.group('rest'))}")
         i += 1
 
-        # ON alatti AND/OR sorok (ha vannak)
+        # csak a közvetlenül alatta lévő AND/OR sorokat normalizáljuk
         while i < len(lines):
             m2 = rx_andor.match(lines[i])
             if not m2:
                 break
             ws2 = m2.group("ws")
             kw = m2.group("kw").upper()
-            rest2 = norm_expr(m2.group("rest"))
-            out.append(f"{ws2}{kw} {rest2}")
+            out.append(f"{ws2}{kw} {norm_expr(m2.group('rest'))}")
             i += 1
 
     return "\n".join(out)
