@@ -323,10 +323,18 @@ def _normalize_on_spacing(s: str) -> str:
 
 def _normalize_insert_column_list(s: str) -> str:
     """
-    INSERT INTO ... ( oszloplista ) blokkokban:
-    - a sor eleji behúzást egységesíti
-    - a vesszők bal oldalon legyenek (', col')
-    - nem próbálja átírni a neveket, csak a vezető whitespace-t rendezi
+    INSERT INTO ... ( oszloplista ) blokkokban EBH stílus:
+      (
+              col1
+            , col2
+            , col3
+      )
+
+    Szabály:
+    - az első (vessző nélküli) oszlopsor behúzása legyen base_ws
+    - a vesszős sorok behúzása legyen base_ws - 2 space (comma_ws)
+    - vessző bal oldalon: '<comma_ws>, <name>'
+    - csak a sor eleji whitespace-t és a vessző előtti elcsúszásokat javítja
     """
     lines = s.split("\n")
     out = []
@@ -336,8 +344,11 @@ def _normalize_insert_column_list(s: str) -> str:
     rx_open = re.compile(r"^\s*\(\s*$")
     rx_close = re.compile(r"^\s*\)\s*$")
 
-    # egy oszlopsor: opcionális vessző + név
-    rx_col = re.compile(r"^(?P<ws>\s*)(?P<comma>,\s*)?(?P<name>\[[^\]]+\]|[A-Za-z0-9_#]+)\s*$")
+    # oszlopsor (csak név + opcionális leading comma)
+    # tail: ritkán lehet, de hagyjuk (pl. shield placeholder vagy egyéb)
+    rx_col = re.compile(
+        r"^(?P<ws>\s*)(?P<comma>,\s*)?(?P<name>\[[^\]]+\]|[A-Za-z0-9_#]+)\s*(?P<tail>.*)?$"
+    )
 
     while i < len(lines):
         if not rx_insert.match(lines[i]):
@@ -349,69 +360,83 @@ def _normalize_insert_column_list(s: str) -> str:
         out.append(lines[i])
         i += 1
 
-        # átengedjük az esetleges whitespace sorokat, míg el nem érjük a nyitó (
+        # whitespace sorok átengedése
         while i < len(lines) and lines[i].strip() == "":
             out.append(lines[i])
             i += 1
 
+        # nyitó (
         if i >= len(lines) or not rx_open.match(lines[i]):
-            # nincs klasszikus oszloplista
             continue
 
-        # nyitó '(' sor
-        out.append(lines[i])
+        out.append(lines[i])  # '('
         i += 1
 
-        # gyűjtjük az oszlop-sorokat a záró ')' sorig
+        # gyűjtés a záró ')' sorig
         block_start = i
-        col_line_indexes = []
-        base_ws = None  # az első oszlopsor behúzása lesz az alap
+        col_idxs = []
+        base_ws = None
 
         while i < len(lines) and not rx_close.match(lines[i]):
             ln = lines[i]
-            m = rx_col.match(ln.strip() == "" and "" or ln)  # üres sorok maradnak
+            if ln.strip() == "":
+                i += 1
+                continue
+
+            m = rx_col.match(ln)
             if m:
-                if base_ws is None:
+                # első nem-vesszős sorból vesszük a base_ws-t (EBH minta szerint)
+                if base_ws is None and m.group("comma") is None:
                     base_ws = m.group("ws")
-                col_line_indexes.append(i)
+                col_idxs.append(i)
             i += 1
 
-        # ha találtunk oszlopokat, normalizáljuk őket
-        if base_ws is not None and col_line_indexes:
-            for j in range(block_start, i):
-                ln = lines[j]
-                if j not in col_line_indexes:
-                    out.append(ln)
-                    continue
+        # ha nem találtunk base_ws-t (pl. minden sor vesszős), fallback: első col sor indentje
+        if base_ws is None and col_idxs:
+            m0 = rx_col.match(lines[col_idxs[0]])
+            base_ws = m0.group("ws") if m0 else ""
 
-                m = rx_col.match(ln)
-                if not m:
-                    out.append(ln)
-                    continue
+        comma_ws = base_ws[:-2] if base_ws and len(base_ws) >= 2 else (base_ws or "")
 
-                name = m.group("name")
-                comma = m.group("comma")
+        # újraépítés a blokkban
+        for j in range(block_start, i):
+            ln = lines[j]
 
-                if comma:
-                    out.append(f"{base_ws}, {name}")
-                else:
-                    out.append(f"{base_ws}{name}")
+            if j not in col_idxs or ln.strip() == "":
+                out.append(ln)
+                continue
 
-        else:
-            # nem ismertük fel -> változatlanul
-            out.extend(lines[block_start:i])
+            m = rx_col.match(ln)
+            if not m:
+                out.append(ln)
+                continue
 
-        # záró ')' sor
+            name = m.group("name")
+            comma = m.group("comma")
+            tail = (m.group("tail") or "").rstrip()
+
+            # tail-ben sokszor csak üres/whitespace; ha van tartalom, egy space-szel elválasztjuk
+            tail_out = ""
+            if tail:
+                tail_out = " " + tail.strip()
+
+            if comma:
+                out.append(f"{comma_ws}, {name}{tail_out}".rstrip())
+            else:
+                out.append(f"{base_ws}{name}{tail_out}".rstrip())
+
+        # záró ')'
         if i < len(lines) and rx_close.match(lines[i]):
             out.append(lines[i])
             i += 1
 
-    # maradék sorok (ha bármi bent maradt)
+    # maradék
     while i < len(lines):
         out.append(lines[i])
         i += 1
 
     return "\n".join(out)
+
 
 def _normalize_values_list(s: str) -> str:
     """
