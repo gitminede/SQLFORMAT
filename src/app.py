@@ -77,6 +77,7 @@ def _shield_noformat_blocks(s: str):
 
     flush_buf()
     return "".join(out), tokens
+    
 def _normalize_where_continuation_and_or(s: str) -> str:
     """
     A WHERE blokkban az elszabadult AND/OR sorokat is az AND-oszlop alá húzza,
@@ -144,6 +145,131 @@ def _normalize_where_continuation_and_or(s: str) -> str:
 
     return "\n".join(out)
 
+def _align_in_subquery_closing_paren(s: str) -> str:
+    """
+    IN ( SELECT ... ) típusú al-lekérdezéseknél a záró ')' igazítása a nyitó '(' alá.
+
+    - Állapotgéppel bejárja a szöveget (stringek/kommentek kihagyása),
+    - megtalálja az 'IN' + whitespace + '(' mintát,
+    - zárójel-szint számlálással megkeresi a párját,
+    - csak akkor igazít, ha a záró sor (strip után) csak ')' (vagy '),', ');', '),;').
+    """
+
+    def line_start_idx(pos: int) -> int:
+        return s.rfind("\n", 0, pos) + 1
+
+    patches = []
+
+    n = len(s)
+    i = 0
+
+    NORMAL, STR, LINE_CMT, BLOCK_CMT = 0, 1, 2, 3
+    state = NORMAL
+
+    stack = []  # (open_paren_pos, open_col, depth)
+
+    def is_word_char(ch: str) -> bool:
+        return ch.isalnum() or ch == "_"
+
+    while i < n:
+        ch = s[i]
+
+        if state == NORMAL:
+            # belépés string/comment
+            if ch == "'":
+                state = STR
+                i += 1
+                continue
+
+            if ch == "-" and i + 1 < n and s[i + 1] == "-":
+                state = LINE_CMT
+                i += 2
+                continue
+
+            if ch == "/" and i + 1 < n and s[i + 1] == "*":
+                state = BLOCK_CMT
+                i += 2
+                continue
+
+            # IN ( felismerés: szóhatárral
+            if (ch == "I" or ch == "i") and i + 1 < n and (s[i + 1] == "N" or s[i + 1] == "n"):
+                prev_ok = (i == 0) or (not is_word_char(s[i - 1]))
+                next_ok = (i + 2 >= n) or (not is_word_char(s[i + 2]))
+                if prev_ok and next_ok:
+                    j = i + 2
+                    # whitespace IN és '(' között (soron belül)
+                    while j < n and s[j].isspace() and s[j] != "\n":
+                        j += 1
+                    if j < n and s[j] == "(":
+                        open_paren_pos = j
+                        open_col = open_paren_pos - line_start_idx(open_paren_pos)
+                        stack.append([open_paren_pos, open_col, 1])
+                        i = j + 1
+                        continue
+
+            # zárójel-számlálás aktív IN( blokkban
+            if stack:
+                if ch == "(":
+                    stack[-1][2] += 1
+                elif ch == ")":
+                    stack[-1][2] -= 1
+                    if stack[-1][2] == 0:
+                        close_paren_pos = i
+                        open_paren_pos, open_col, _ = stack.pop()
+
+                        cls = line_start_idx(close_paren_pos)
+                        cle = s.find("\n", close_paren_pos)
+                        if cle == -1:
+                            cle = n
+                        close_line = s[cls:cle]
+                        stripped = close_line.strip()
+
+                        # engedjük: ")", "),", ");", "),;"
+                        if re.fullmatch(r"\)\s*[,;]?\s*[,;]?\s*", stripped):
+                            tail = stripped[1:].strip()  # ')' utáni rész
+
+                            # pontosan a nyitó '(' alá
+                            if tail and re.fullmatch(r"[,;]{1,2}", tail):
+                                repl = (" " * open_col) + ")" + tail
+                            else:
+                                repl = (" " * open_col) + ")" + ((" " + tail) if tail else "")
+
+                            patches.append((cls, cle, repl))
+
+            i += 1
+            continue
+
+        if state == STR:
+            # SQL string: '' escape
+            if ch == "'":
+                if i + 1 < n and s[i + 1] == "'":
+                    i += 2
+                    continue
+                state = NORMAL
+                i += 1
+                continue
+            i += 1
+            continue
+
+        if state == LINE_CMT:
+            if ch == "\n":
+                state = NORMAL
+            i += 1
+            continue
+
+        if state == BLOCK_CMT:
+            if ch == "*" and i + 1 < n and s[i + 1] == "/":
+                state = NORMAL
+                i += 2
+                continue
+            i += 1
+            continue
+
+    # patchek alkalmazása visszafelé
+    for cls, cle, repl in reversed(patches):
+        s = s[:cls] + repl + s[cle:]
+
+    return s
 
 def _normalize_in_subquery_blocks(s: str) -> str:
     """
@@ -1463,7 +1589,7 @@ def format_sql(sql: str) -> str:
 
     # CTE záró ')'
     s = _align_cte_closing_paren(s)
-
+    s = _align_in_subquery_closing_paren(s)
     # INSERT oszloplista + VALUES lista
     s = _normalize_insert_column_list(s)
     s = _normalize_values_list(s)
