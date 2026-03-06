@@ -66,7 +66,7 @@ def format_sql(sql: str) -> str:
     s = _normalize_values_list(s)
     s = _normalize_insert_column_list(s)
     s = _normalize_group_order_by_lists(s)   
-
+    s = _normalize_update_set_list(s)   # <-- UPDATE SET patch
     # 10) Pajzs vissza:ek + stringek eredetije
     s = _unshield(s, tokens)
 
@@ -131,6 +131,141 @@ def _normalize_join_on_indent(s: str) -> str:
             continue
 
         out.append(ln)
+
+    return "\n".join(out)
+
+def _normalize_update_set_list(s: str) -> str:
+    """
+    UPDATE ... SET lista EBH-stílusú formázása:
+
+    SET      col1               = expr
+           , col2               = expr
+           , col3               = expr
+
+    - Az első értékadás a SET sorban van
+    - A további értékadások bal vesszős sorok
+    - '=' oszlop igazítás a SET blokkon belül
+    - Csak olyan SET blokkokra fut, ahol ténylegesen 'col = expr' van (nem SET NOCOUNT ON)
+    """
+    lines = s.split("\n")
+    out = []
+    i = 0
+
+    # SET sor: indent + SET + rest
+    rx_set = re.compile(r"^(?P<ws>\s*)SET\b(?P<rest>.*)$", re.IGNORECASE)
+
+    # Clause/break: mikor ér véget a SET lista
+    rx_break = re.compile(
+        r"^\s*(WHERE\s{4}\b|FROM\s{5}\b|JOIN\b|LEFT\b|RIGHT\b|FULL\b|CROSS\b|OUTER\b|INNER\b|GROUP\s+BY\b|ORDER\s+BY\b|HAVING\b|OUTPUT\b|RETURN\b|UNION\b|EXCEPT\b|INTERSECT\b|;)\b",
+        re.IGNORECASE,
+    )
+
+    # értékadás sor: opcionális leading comma + lhs = rhs
+    rx_assign = re.compile(
+        r"^(?P<comma>,\s*)?(?P<lhs>.+?)\s*=\s*(?P<rhs>.+?)\s*$"
+    )
+
+    while i < len(lines):
+        m = rx_set.match(lines[i])
+        if not m:
+            out.append(lines[i])
+            i += 1
+            continue
+
+        ws = m.group("ws")
+        rest = m.group("rest").strip()
+
+        # Csak akkor kezeljük, ha ténylegesen van '=' a SET sorban vagy közvetlenül utána jövő sorokban.
+        looks_like_assign = ("=" in rest)
+        if not looks_like_assign:
+            # nézzük meg a következő 1-2 sort gyorsan
+            j = i + 1
+            while j < len(lines) and lines[j].strip() == "":
+                j += 1
+            if j < len(lines) and "=" in lines[j]:
+                looks_like_assign = True
+
+        if not looks_like_assign:
+            # pl. SET NOCOUNT ON – hagyjuk
+            out.append(lines[i])
+            i += 1
+            continue
+
+        # EBH SET prefix: 'SET' + 6 space (összesen 9 char, mint WHERE    / FROM     logika)
+        set_prefix = ws + "SET      "
+        # A vesszős sorok indentje: SET prefix hossza - 2
+        comma_ws = ws + (" " * (len("SET      ") - 2))
+
+        # Gyűjtjük a SET blokk sorait:
+        # - első értékadás: SET sor rest-je
+        # - majd a további sorok, amíg break clause nem jön
+        block = []
+        block.append(("HEAD", rest))
+        i += 1
+
+        while i < len(lines):
+            ln = lines[i]
+            if ln.strip() == "":
+                # üres sor -> a SET listát általában nem törjük, de engedjük és álljunk meg
+                break
+            if rx_break.match(ln):
+                break
+
+            # tipikusan: ", col = expr" vagy "col = expr"
+            # (ha valami teljesen más, inkább megállunk)
+            if "=" not in ln:
+                break
+
+            block.append(("ITEM", ln.strip()))
+            i += 1
+
+        # Parse: lhs/rhs + max lhs hossz (csak '='-os sorok)
+        parsed = []
+        max_lhs = 0
+
+        for kind, txt in block:
+            if kind == "HEAD":
+                src = txt
+            else:
+                src = txt
+
+            ma = rx_assign.match(src.lstrip())
+            if not ma:
+                parsed.append((kind, None, src))
+                continue
+
+            lhs = ma.group("lhs").strip()
+            rhs = ma.group("rhs").strip()
+
+            max_lhs = max(max_lhs, len(lhs))
+            parsed.append((kind, (lhs, rhs), None))
+
+        # Rebuild
+        for idx, (kind, parts, raw) in enumerate(parsed):
+            if parts is None:
+                # ha valamiért nem parse-olható, hagyjuk “ahogy van”
+                if kind == "HEAD":
+                    out.append(ws + "SET " + (raw or ""))
+                else:
+                    out.append(comma_ws + ", " + (raw or ""))
+                continue
+
+            lhs, rhs = parts
+            if kind == "HEAD":
+                out.append(f"{set_prefix}{lhs.ljust(max_lhs)} = {rhs}")
+            else:
+                out.append(f"{comma_ws}, {lhs.ljust(max_lhs)} = {rhs}")
+
+        # ha a SET blokk után üres sor jött, azt itt még kiírjuk, és léptetünk
+        # (a ciklus elején a break miatt nem nyelte el)
+        if i < len(lines) and lines[i].strip() == "":
+            out.append(lines[i])
+            i += 1
+
+    # maradék
+    while i < len(lines):
+        out.append(lines[i])
+        i += 1
 
     return "\n".join(out)
 
