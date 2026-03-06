@@ -50,7 +50,7 @@ def format_sql(sql: str) -> str:
     # 5) JOIN / ON indent + ON spacing (a korábbi javításaid szerint)
     s = _normalize_join_on_indent(s)
     s = _normalize_on_spacing(s)
-
+    s = _normalize_select_list_commas(s)  # <-- ÚJ: SELECT lista balvesszőssé
     # 6) SELECT '=' igazítás
     s = _align_select_equals(s)
 
@@ -131,6 +131,112 @@ def _normalize_join_on_indent(s: str) -> str:
             continue
 
         out.append(ln)
+
+    return "\n".join(out)
+def _normalize_select_list_commas(s: str) -> str:
+    """
+    SELECT lista balvesszőssé alakítása:
+
+    SELECT   col1
+           , col2
+           , alias = expr
+    FROM     ...
+
+    - SELECT blokkot a következő FROM-ig formáz (ugyanabban a szinten, a prefix alapján).
+    - A listaelemeket top-level vesszők mentén szedi szét (zárójel depth 0).
+    - A komment/string pajzs mellett biztonságos (placeholder-ben nincs top-level ',').
+    """
+    lines = s.split("\n")
+    out = []
+    i = 0
+
+    rx_sel = re.compile(r"^(?P<ws>\s*)SELECT\s{3}(?P<rest>.*)$", re.IGNORECASE)
+    rx_from = re.compile(r"^\s*FROM\s{5}\b", re.IGNORECASE)
+
+    def split_top_level_csv(expr: str):
+        parts = []
+        buf = []
+        depth = 0
+        for ch in expr:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth = max(depth - 1, 0)
+            if ch == "," and depth == 0:
+                parts.append("".join(buf).strip())
+                buf = []
+            else:
+                buf.append(ch)
+        tail = "".join(buf).strip()
+        if tail:
+            parts.append(tail)
+        return parts
+
+    while i < len(lines):
+        m = rx_sel.match(lines[i])
+        if not m:
+            out.append(lines[i])
+            i += 1
+            continue
+
+        ws = m.group("ws")
+        rest = m.group("rest").strip()
+
+        # DISTINCT / TOP kezelése (opcionális): az expr oszlopot ezek után számoljuk
+        sel_prefix = ws + "SELECT   "
+        extra = ""
+        rest_up = rest.upper()
+        if rest_up.startswith("DISTINCT "):
+            extra = "DISTINCT "
+            rest = rest[len("DISTINCT "):].lstrip()
+        elif rest_up.startswith("TOP "):
+            # TOP (n) / TOP n esetet nem bontunk szét részletesen: a TOP ... előtagot megtartjuk
+            # Példa: TOP (10) col1, col2 -> extra = 'TOP (10) '
+            # megpróbáljuk az első whitespace-ig venni a TOP utáni részt
+            # (praktikus, pajzs mellett biztonságos)
+            # TOP ... prefix végét az első olyan rész után vesszük, ami után legalább 1 space van
+            # Egyszerűsítés: a TOP utáni első token(ek)-et a következő space-ig vesszük
+            # (ha nem sikerül, marad simán)
+            parts = rest.split(None, 2)
+            if len(parts) >= 2:
+                # parts[0] = TOP, parts[1] = (10) vagy 10
+                extra = f"TOP {parts[1]} "
+                rest = parts[2].lstrip() if len(parts) == 3 else ""
+
+        sel_prefix = ws + "SELECT   " + extra
+
+        # A folytató sorok vesszője 2-vel balrább legyen
+        first_expr_col = len(sel_prefix)
+        comma_ws = " " * max(first_expr_col - 2, 0)
+
+        # Gyűjtjük a SELECT listát a FROM sorig
+        block_lines = [rest] if rest else []
+        i += 1
+        while i < len(lines) and not rx_from.match(lines[i]):
+            ln = lines[i].strip()
+            if ln:
+                # ha már balvesszős: ", ..." -> vessző levág
+                if ln.startswith(","):
+                    ln = ln[1:].lstrip()
+                block_lines.append(ln)
+            i += 1
+
+        # Egységesítjük egy stringgé és szétvágjuk top-level vesszőkkel
+        joined = " ".join(block_lines).strip()
+        items = split_top_level_csv(joined) if joined else []
+
+        if not items:
+            # ha üres a lista (ritka), csak a prefix sor
+            out.append(sel_prefix.rstrip())
+        else:
+            out.append(sel_prefix + items[0])
+            for item in items[1:]:
+                out.append(f"{comma_ws}, {item}")
+
+        # FROM sor (ha van) vissza
+        if i < len(lines) and rx_from.match(lines[i]):
+            out.append(lines[i])
+            i += 1
 
     return "\n".join(out)
 
