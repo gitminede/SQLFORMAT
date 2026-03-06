@@ -902,34 +902,34 @@ def _split_select_from(s: str) -> str:
     
 def _normalize_group_order_by_lists(s: str) -> str:
     """
-    GROUP BY / ORDER BY lista EBH-stílusú formázása:
-
-    ORDER BY col1
-           , col2
-           , col3
-
-    GROUP BY col1
-           , col2
-
-    - Ha a clause sorban több elem van vesszővel: szétszedi több sorra (zárójel depth 0-nál).
-    - Ha már több soros: a vesszős sorok behúzását egységesíti.
-    - A vesszős sorok indentje: (első elem oszlopa) - 2.
+    GROUP BY / ORDER BY lista EBH-stílus szerint:
+    
+        ORDER BY col1
+               , col2
+               , col3
+    
+    INSERT-szerű indent:
+      - első elem oszlopa = kulcsszó után eggyel
+      - vesszős sorok = (első elem indent) - 2
     """
     lines = s.split("\n")
     out = []
     i = 0
 
-    rx_clause = re.compile(r"^(?P<ws>\s*)(?P<kw>(ORDER|GROUP)\s+BY)\s+(?P<rest>.*)$", re.IGNORECASE)
-
-    # Hol ér véget a GROUP/ORDER BY blokk (ha új clause kezdődik)
-    rx_break = re.compile(
-        r"^\s*(SELECT\b|FROM\b|WHERE\b|HAVING\b|ORDER\s+BY\b|GROUP\s+BY\b|UNION\b|EXCEPT\b|INTERSECT\b|INSERT\b|UPDATE\b|DELETE\b|MERGE\b|WITH\b|RETURN\b)\b",
-        re.IGNORECASE,
+    rx_clause = re.compile(
+        r"^(?P<ws>\s*)(?P<kw>(ORDER|GROUP)\s+BY)\s+(?P<rest>.*)$",
+        re.IGNORECASE
     )
 
-    def split_top_level_csv(expr: str):
-        """Vessző mentén split csak zárójel-depth 0-nál (pajzs mellett biztonságos)."""
-        parts = []
+    # új clause kezdetét jelző minták
+    rx_break = re.compile(
+        r"^\s*(SELECT\b|FROM\b|WHERE\b|HAVING\b|ORDER\s+BY\b|GROUP\s+BY\b|UNION\b|EXCEPT\b|INTERSECT\b|INSERT\b|UPDATE\b|DELETE\b|MERGE\b|WITH\b|RETURN\b)\b",
+        re.IGNORECASE
+    )
+
+    def split_expr(expr: str):
+        """Top-level CSV split (pajzs után biztonságos)."""
+        items = []
         buf = []
         depth = 0
         for ch in expr:
@@ -938,14 +938,14 @@ def _normalize_group_order_by_lists(s: str) -> str:
             elif ch == ")":
                 depth = max(depth - 1, 0)
             if ch == "," and depth == 0:
-                parts.append("".join(buf).strip())
+                items.append("".join(buf).strip())
                 buf = []
             else:
                 buf.append(ch)
         tail = "".join(buf).strip()
         if tail:
-            parts.append(tail)
-        return parts
+            items.append(tail)
+        return items
 
     while i < len(lines):
         m = rx_clause.match(lines[i])
@@ -958,31 +958,27 @@ def _normalize_group_order_by_lists(s: str) -> str:
         kw = m.group("kw")
         rest = m.group("rest").strip()
 
-        # Az első elem kezdőoszlopa: ws + kw + ' ' hossza
-        first_expr_col = len(ws) + len(kw) + 1
-        comma_col = max(first_expr_col - 2, 0)
-        comma_ws = " " * comma_col
+        # első elem indentje
+        first_indent_len = len(ws) + len(kw) + 1
+        first_indent = " " * first_indent_len
 
-        # Clause sor felbontása: ha több elem van, szétszedjük
-        items = split_top_level_csv(rest)
+        # vesszős sor indent (2-vel balrább)
+        comma_indent = " " * max(first_indent_len - 2, 0)
 
-        # Írjuk ki az első sort
-        if items:
-            out.append(f"{ws}{kw} {items[0]}")
-        else:
-            out.append(lines[i])
+        items = split_expr(rest)
 
-        # További elemek -> bal vesszős sorok
+        # első sor
+        out.append(f"{ws}{kw} {items[0]}")
+
+        # további sorok: balvessző, INSERT-szerűen
         for item in items[1:]:
-            out.append(f"{comma_ws}, {item}")
+            out.append(f"{comma_indent}, {item}")
 
         i += 1
 
-        # Ha a következő sorokban már voltak vesszős elemek (multi-line ORDER/GROUP), normalizáljuk őket is,
-        # de csak addig, amíg nem jön új clause / statement rész.
+        # ha a folytatás sorai is listatagok, normalizáljuk
         while i < len(lines):
             ln = lines[i]
-
             if ln.strip() == "":
                 out.append(ln)
                 i += 1
@@ -991,18 +987,15 @@ def _normalize_group_order_by_lists(s: str) -> str:
             if rx_break.match(ln):
                 break
 
-            # Csak azokat a sorokat igazítjuk, amelyek listatagnak néznek ki:
-            # - ", ..." vagy sima "..." (ritkán), mindkettőt vesszős sorra húzzuk, kivéve ha már items-ből jött
             stripped = ln.strip()
+            # már vesszővel kezdődik
             if stripped.startswith(","):
                 item = stripped[1:].strip()
-                out.append(f"{comma_ws}, {item}")
-                i += 1
-                continue
+                out.append(f"{comma_indent}, {item}")
+            else:
+                # nem vesszővel -> alakítsuk listataggá
+                out.append(f"{comma_indent}, {stripped}")
 
-            # Ha valaki vessző nélkül írta a következő sort, tegyük vesszősre (EBH lista)
-            # Pl. ORDER BY col1 \n col2  -> , col2
-            out.append(f"{comma_ws}, {stripped}")
             i += 1
 
     return "\n".join(out)
