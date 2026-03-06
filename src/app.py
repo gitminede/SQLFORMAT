@@ -12,6 +12,7 @@ _RX_SEP = re.compile(r"^-{5,}\s*$", re.MULTILINE)
 _RX_WITH_NOLOCK = re.compile(r"\bWITH\s*\(\s*NOLOCK\s*\)", re.IGNORECASE)
 _RX_BARE_NOLOCK = re.compile(r"\(\s*NOLOCK\s*\)", re.IGNORECASE)
 
+
 _RX_HTML = [
     (re.compile(r"&lt;", re.IGNORECASE), "<"),
     (re.compile(r"&gt;", re.IGNORECASE), ">"),
@@ -20,72 +21,63 @@ _RX_HTML = [
 
 
 def format_sql(sql: str) -> str:
-    # CRLF normalizálás (ne legyenek \r-ek)
+    # CRLF normalizálás
     s = sql.replace("\r", "")
 
-    
-    # (1) formatting off/on blokkok pajzsolása – MINDIG elsőként
+    # (1) formatting off/on blokkok pajzsolása – elsőként
     s, nofmt_tokens = _shield_noformat_blocks(s)
-    
-    # (2) komment + string pajzs (a B)
-    s, tokens = _shield_comments_and_strings(s)
 
-    
-    # 0) Pajzs: kommentek + stringek kivétele
-    s, tokens = _shield_comments_and_strings(s)
+    # (2) komment + string pajzs (B) – EGYSZER
+    s, shield_tokens = _shield_comments_and_strings(s)
 
-
+    # --- innen jöhet a formázás a pajzsolt szövegen ---
     s = _split_select_from(s)
     s = _uppercase_order_group(s)
 
-
-    # 1) HTML entity visszaalakítás (MOST már biztonságos, mert string/komment nem érintett)
+    # HTML entity visszaalakítás (ha kell)
     for rx, repl in _RX_HTML:
         s = rx.sub(repl, s)
 
-    # 2) szeparátor normalizálás
     s = _RX_SEP.sub("-------------------------------------------------------------------------------", s)
-
-    # 3) NOLOCK normalizálás
     s = _RX_WITH_NOLOCK.sub("( NOLOCK )", s)
     s = _RX_BARE_NOLOCK.sub("( NOLOCK )", s)
 
-    # 4) Prefixek
+    # Prefixek (itt nálad jelenleg 1 space van, ha EBH szerint 3/5/4 kell, később visszaállítjuk)
     s = re.sub(r"\bSELECT\s+", "SELECT   ", s, flags=re.IGNORECASE)
-    s = re.sub(r"\bFROM\s+", "FROM     ", s, flags=re.IGNORECASE)
-    s = re.sub(r"\bWHERE\s+", "WHERE    ", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bFROM\s+",   "FROM     ", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bWHERE\s+",  "WHERE    ", s, flags=re.IGNORECASE)
 
-    # 5) JOIN / ON indent + ON spacing (a korábbi javításaid szerint)
     s = _normalize_join_on_indent(s)
     s = _normalize_on_spacing(s)
-    s = _normalize_select_list_commas(s)  # <-- ÚJ: SELECT lista balvesszőssé
-    # 6) SELECT '=' igazítás
+
+    s = _normalize_select_list_commas(s)
     s = _align_select_equals(s)
 
-    # 7) WHERE operátor-oszlop igazítás (csak WHERE, ON-t nem)
+    # WHERE igazítás (csak WHERE)
     s = _align_where_on_ops(s)
 
-    
-    s = _normalize_parenthesized_where_groups(s)  # <-- új
-    s = _normalize_set_lists(s)                   # <-- ú
+    s = _normalize_parenthesized_where_groups(s)
+    s = _normalize_set_lists(s)
 
-
-    # 8) CASE WHEN kompakt
     s = _compact_case_when(s)
 
-    # 9) CREATE TABLE oszlop/típus igazítás (A pontból)
     s = _align_create_table_columns(s)
     s = _align_cte_closing_paren(s)
+
     s = _normalize_values_list(s)
     s = _normalize_insert_column_list(s)
-    s = _normalize_group_order_by_lists(s)   
-    s = _normalize_update_set_list(s)   # <-- UPDATE SET patch
-    # 10) Pajzs vissza:ek + stringek eredetije
-    s = _unshield(s, tokens)
-    if "__EBH_SHIELD_" in s:
-        raise RuntimeError("UNSHIELD nem futott le vagy hibás: placeholder maradt a kimenetben")
-    return s.rstrip() + "\n"
+    s = _normalize_group_order_by_lists(s)
+    s = _normalize_update_set_list(s)
 
+    # --- pajzs visszaállítások ---
+    s = _unshield(s, shield_tokens)                 # komment+string vissza
+    s = _unshield_noformat_blocks(s, nofmt_tokens)  # formatting off/on vissza
+
+    # placeholder ne maradjon bent
+    if "__EBH_SHIELD_" in s or "__EBH_NOFMT_" in s:
+        raise RuntimeError("UNSHIELD nem futott le vagy hibás: placeholder maradt a kimenetben")
+
+    return s.rstrip() + "\n"
 
 
 def _normalize_join_on_indent(s: str) -> str:
